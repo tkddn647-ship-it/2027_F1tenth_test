@@ -209,43 +209,253 @@ Roboracer-2026-main/src/path_following/scripts/extract_centerline_from_map.py
 - occupancy에서 차체 inflate ≈ 0.14 m
 - 맵: ROS trinary, 어두운 픽셀·unknown ≈ 벽, 밝은 픽셀 = free
 
-### 보상 (현재: 한 바퀴 목표)
+### 보상 (요약표)
 
-**관측은 mapless.** 보상만 랩 진행을 위해 센터라인을 privileged로 사용.
+아래 **「알고리즘 & 보상함수 상세」** 절에 수식·변수·종료조건까지 전부 적음.
 
 | 항 | 대략 | 역할 |
 |----|------|------|
-| `+2.5 * max(Δcenterline, 0)` | 진행 | 한 바퀴의 핵심 |
+| `+2.5 * max(Δcenterline, 0)` | 진행 | 한 바퀴의 핵심 (privileged) |
 | `+1.0 * v_norm` | 속도 | 2 m/s 고착 완화 |
 | `+0.6 * mid + 0.4 * front` | LiDAR 여유 | 벽 회피 |
 | 앞 뚫림 + 거의 최저속 | −0.4 | 저속 고착 페널티 |
 | 충돌 | −30 | 종료 |
 | 랩 완주 | `+ (200 - lap_time)` | 빠른 완주 보너스 |
 
-- 에피소드 종료: **충돌 또는 랩 완주** (또는 `MAX_STEPS=8000`)
-- `info["progress"]`, `info["lap_time"]` 로 모니터링
-- `reward_mode`: `mapless_obs_lap_reward`
-
-> 보상 스케일을 바꾸면 `ep_rew_mean` 숫자는 이전 run과 **비교 불가**.  
-> 볼 것: `ep_len`, `progress`, 완주 횟수(`LapTimeLogger`).
+`reward_mode`: `mapless_obs_lap_reward`
 
 ### 모방학습이 아닌 이유
 
 - 데모/Stanley 궤적을 따라 학습하지 않음
 - 시행착오 + 보상으로 정책 갱신 (PPO)
-- 센터라인은 “이 조향을 따라라” 라벨이 아니라 **진행도 줄자**
+- 센터라인은 “이 조향을 따라라” 라벨이 아니라 **진행도 줄자 (보상 전용)**
 
 ---
 
-## 커넥톰 모델
+## 알고리즘 & 보상함수 상세
 
-1. `hemibrain_cache` 로드 (또는 합성 T4/T5→CX→DN)
-2. `select_speed_relevant_subcircuit` 으로 운동/시야 관련 ~800 뉴런
-3. 인접행렬 고정 → `ConnectomeRNN` (토폴로지 고정, 학습 가능 가중치)
-4. SB3 `MlpPolicy`의 **features extractor**로 장착, `net_arch=[]`
-5. PPO: `n_steps=512`, `batch_size=256`, `lr=3e-4`, `gamma=0.99`, 기본 `n_envs=4`
+구현 위치: `lidar_race_env.py` (MDP·보상), `connectome_rnn.py` (뇌), `train_connectome.py` (PPO).
 
-MLP 베이스라인(`--baseline`): 동일 env, `net_arch=[64,64]`, 커넥톰 없음.
+### 1. 문제 정의 (MDP)
+
+연속 제어 MDP \(\langle \mathcal{S}, \mathcal{A}, P, R, \gamma \rangle\).
+
+| 기호 | 의미 | 본 레포 |
+|------|------|---------|
+| \(s_t\) | 관측(에이전트가 보는 것) | LiDAR 20 + \(v_{norm}\) + yaw_rate → \(\mathbb{R}^{22}\) |
+| \(a_t\) | 행동 | \([a^{steer}, a^{speed}]\) ∈ \([-1,1]\times[0,1]\) |
+| \(P\) | 전이 | bicycle + occupancy 충돌 |
+| \(R\) | 보상 | 아래 식 (시뮬레이터만 센터라인·맵 사용) |
+| \(\gamma\) | 할인 | `0.99` (PPO) |
+
+**mapless의 정확한 의미**
+
+- 정책 \(\pi(a|s)\) 의 \(s\)에는 **맵·센터라인·글로벌 좌표가 없음**.
+- 보상 \(R\) 계산 시 시뮬레이터가 centerline CSV를 쓸 수 있음 → *privileged reward* / *mapless observation*.
+- 실차 추론 시에도 정책 입력은 `/scan`(+속도)만 있으면 됨.
+
+Stanley와의 차이: Stanley는 **관측으로** 경로 오차(CTE 등)를 직접 씀. 우리는 관측으로 경로를 안 주고, 학습 신호로만 진행도를 줌.
+
+### 2. 관측 · 행동 · 동역학 (수식)
+
+**관측**
+
+\[
+s = \big[\, d_1,\ldots,d_{20},\; v_{norm},\; \tilde{\omega} \,\big]
+\]
+
+- \(d_i = \mathrm{clip}(r_i / 8,\ 0,\ 1)\): 레이캐스트 거리 / `RAY_RANGE`
+- \(v_{norm} = (v - 2)/(7-2)\): 실제 속도 \(v\in[2,7]\) m/s
+- \(\tilde{\omega} = \mathrm{clip}(\dot\theta / 3,\ -1,\ 1)\)
+
+**행동 → 액추에이터**
+
+\[
+\delta = a^{steer}\cdot 0.3735\ \mathrm{rad},\qquad
+v^{cmd} = 2 + a^{speed}\cdot 5\ \mathrm{m/s}
+\]
+
+**동역학** (`DT = Δt = 0.05`, `L = 0.33`)
+
+속도 1차 추종 후 클램프:
+
+\[
+v \leftarrow \mathrm{clip}\big(v + 0.35(v^{cmd}-v),\ 2,\ 7\big)
+\]
+
+bicycle:
+
+\[
+\begin{aligned}
+x &\leftarrow x + v\cos\theta\,\Delta t \\
+y &\leftarrow y + v\sin\theta\,\Delta t \\
+\theta &\leftarrow \theta + \frac{v}{L}\tan\delta\,\Delta t
+\end{aligned}
+\]
+
+최소 회전반경 \(R_{\min} \approx L/\tan(0.3735) \approx 0.84\,\mathrm{m}\).
+
+충돌: 위치 \((x,y)\) 및 inflate 0.14 m 이웃이 occupied면 `collided`.
+
+### 3. 보상함수 (현재 코드 그대로)
+
+매 step, 먼저 센터라인 인덱스 진행량 \(\Delta\)를 계산한다 (관측에는 안 넣음).
+
+1. 현재 위치에서 centerline 최근접 인덱스 \(i_{new}\) (이전 인덱스 근처 윈도우 탐색).
+2. \(\Delta = i_{new} - i_{old}\) (루프 wrap 보정).
+3. 누적 \(\sum \max(\Delta,0) \ge N-3\) 이면 랩 완주 (`N` = 센터라인 점 수).
+
+LiDAR 보조량 (정규화 거리 \([0,1]\)):
+
+- `mid` = 빔 인덱스 7..12 평균 (전측방 여유)
+- `front` = 빔 인덱스 9..10 평균 (정면)
+
+**기본 보상**
+
+\[
+\begin{aligned}
+r &= 2.5\cdot\max(\Delta,0)
+   + 1.0\cdot v_{norm}
+   + 0.6\cdot mid
+   + 0.4\cdot\min(front,\ 0.5)
+\end{aligned}
+\]
+
+**가감점**
+
+| 조건 | 가감 |
+|------|------|
+| `front > 0.35` 이고 `v_norm < 0.15` (앞 뚫렸는데 거의 최저속) | \(r \leftarrow r - 0.4\) |
+| `collided` | \(r \leftarrow r - 30\) |
+| `front < 0.12` | \(r \leftarrow r - 0.6\) |
+| 이 step에서 랩 완주 | \(r \leftarrow r + \max(0,\ 200 - t_{lap})\), \(t_{lap}=steps\cdot\Delta t\) |
+
+**에피소드 종료**
+
+- `terminated`: 충돌 **또는** 랩 완주
+- `truncated`: `steps >= 8000` (최대 400 s)
+
+**항별 의도**
+
+| 항 | 왜 넣었나 | 부작용 |
+|----|-----------|--------|
+| \(2.5\max(\Delta,0)\) | 한 바퀴 방향으로 나가게 | 좁은 트랙에선 센터라인 근처 궤적과 닮음 |
+| \(v_{norm}\) | 2 m/s 고착 완화 | 너무 크면 무모한 가속 |
+| mid / front | mapless 벽 회피 | 제자리 선회로도 점수 가능 → 진행항으로 상쇄 |
+| 저속 페널티 | 열린 길에서 최저속 고정 방지 | — |
+| 충돌 −30 | 벽 박기 억제 | 초반 과도하게 소극적일 수 있음 |
+| 완주 \(200-t\) | 빠른 랩 유도 | 완주 전에는 안 나옴 |
+
+**로그 해석 주의:** `ep_rew_mean`은 보상식에 종속. 식 바꾸면 이전 run과 숫자 비교 금지. 완주·`ep_len`·`progress`를 볼 것.
+
+코드 대응 (`lidar_race_env.py` `step`):
+
+```text
+reward = 2.5*max(delta,0) + 1.0*v_norm + 0.6*mid + 0.4*min(front,0.5)
+(+ 가감점 / 랩 보너스)
+```
+
+### 4. 정책 알고리즘: PPO + 커넥톰 / MLP
+
+학습 라이브러리: **Stable-Baselines3 PPO** (클리핑된 정책 경사 + value).
+
+**공통 하이퍼파라미터** (`train_connectome.py`)
+
+| 항목 | 값 |
+|------|-----|
+| `n_envs` | 4 (병렬 환경) |
+| `n_steps` | 512 (환경당 rollout 길이) |
+| `batch_size` | 256 |
+| `learning_rate` | \(3\times 10^{-4}\) |
+| `gamma` | 0.99 |
+| policy | Gaussian (`MlpPolicy`, continuous) |
+| device | CPU 기본 |
+
+한 iteration에서 대략 \(4\times 512 = 2048\) env-step 수집 후 여러 에폭 업데이트.
+
+**목표 (개념)**
+
+\[
+\max_\theta\; \mathbb{E}\Big[\sum_t \gamma^t r_t\Big]
+\quad\text{with clipped surrogate (PPO)}
+\]
+
+정책은 \(a_t \sim \mathcal{N}(\mu_\theta(s_t),\ \sigma_\theta)\). 학습되며 `std`가 줄어드는 것이 탐험 감소 신호.
+
+#### 4.1 커넥톰 정책 (본선)
+
+1. **데이터:** neuPrint hemibrain → `hemibrain_cache` (또는 합성 T4/T5→CX→DN).
+2. **서브서킷:** `select_speed_relevant_subcircuit` → 운동/시야 관련 약 800 뉴런, sparse 연결.
+3. **고정 토폴로지** \(A_{signed}\in\mathbb{R}^{N\times N}\): 연결 유무·부호 고정 (학습으로 새 엣지 생성 불가).
+4. **학습 파라미터**
+   - `scale` (같은 shape): 연결 **세기**
+   - `W_in`: 관측 \(s\in\mathbb{R}^{22}\) → 입력 뉴런
+   - (학습 시 features extractor 출력이 정책 헤드 입력이 되도록 `W_out`을 Identity로 두고, SB3가 그 위 액션 헤드를 학습)
+
+**내부 동역학** (leaky RNN, FLYNN 스타일; `connectome_rnn.py`):
+
+\[
+\begin{aligned}
+W_{eff} &= A_{signed}\odot scale\odot mask_{topo} \\
+h &\leftarrow h + \frac{\Delta t}{\tau}\Big(-h + \tanh(W_{eff}^\top h + drive(s))\Big)
+\end{aligned}
+\]
+
+관측 1회당 내부 `n_inner_steps=2` 번 적분 후, 출력 뉴런 활성화를 feature로 씀 → 그 위 **액션 평균 네트워크** (SB3, `net_arch=[]`).
+
+요지: **배선 prior는 생물 커넥톰, 세기·입출력·정책 헤드는 RL.**
+
+#### 4.2 MLP 베이스라인 (`--baseline`)
+
+- 동일 환경·동일 보상·동일 PPO 하이퍼.
+- features = 관측 직접, `net_arch=[64, 64]`.
+- 커넥톰 없음 → **구조 ablation**용.
+
+#### 4.3 학습 루프 (요약)
+
+```text
+env = LidarRaceEnv(map=ajou) × n_envs
+policy = ConnectomeFeaturesExtractor + action head   # or MLP
+for iteration:
+    collect rollouts (s, a, r, s')
+    PPO update (clip policy + value loss)
+save connectome_ppo_lidar_ajou.zip
+```
+
+`--resume zip` 또는 같은 이름 zip이 있으면 `PPO.load` 후 `learn(..., reset_num_timesteps=False)`로 **이어서** 학습.
+
+### 5. 추론 (실차 / watch)
+
+```text
+obs = downsample(/scan) + v_norm + yaw_rate
+a = policy.predict(obs, deterministic=True)
+/drive.steering_angle = a[0] * 0.3735
+/drive.speed          = 2 + a[1] * 5
+```
+
+센터라인·맵 로컬라이제이션 **불필요** (정책 입력 기준).  
+완주 여부 평가는 로그용으로 CSV를 쓸 수 있음.
+
+### 6. 커넥톰 vs “그냥 RL” vs Stanley
+
+| | Stanley | 본 PPO (커넥톰/MLP) |
+|--|---------|---------------------|
+| 알고리즘 | 기하 경로추종 | 정책 경사 (PPO) |
+| 입력 | 경로 오차 | LiDAR (+v) |
+| 센터라인 | 제어에 직접 사용 | 보상(학습)에만 / 추론 불필요 |
+| 커넥톰 특이점 | — | **동일 PPO**에서 네트워크 구조 prior만 교체 |
+
+---
+
+## 커넥톰 모델 (짧은 체크리스트)
+
+1. `hemibrain_cache` 로드 (또는 합성)
+2. 속도관련 서브서킷 ~800
+3. `ConnectomeRNN` 토폴로지 고정 + scale 학습
+4. SB3 features extractor, `net_arch=[]`
+5. PPO 하이퍼 위 표 참고
+
+MLP: `--baseline`, `net_arch=[64,64]`.
 
 ---
 
@@ -341,6 +551,7 @@ A. 아직 보장 없음. Stanley는 레퍼런스. 주 비교는 **같은 보상 
 
 ## 참고 링크
 
+- 이 레포: https://github.com/tkddn647-ship-it/2027_F1tenth_test
 - [neuPrint hemibrain](https://neuprint.janelia.org)
 - [f1tenth_racetracks](https://github.com/f1tenth/f1tenth_racetracks)
 - 실차: `Roboracer-2026-main/`
