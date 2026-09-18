@@ -1,0 +1,11 @@
+# 최소 의존성 (현재 Python 3.14 환경 기준)
+torch
+gymnasium
+stable-baselines3
+numpy
+pandas
+pyarrow
+neuprint-python
+pyyaml
+pillow
+matplotlib

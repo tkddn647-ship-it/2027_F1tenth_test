@@ -1,0 +1,57 @@
+/**:
+  ros__parameters:
+    lidar_rate_hz: 40.0
+    imu_rate_hz: 1000.0
+    odom_rate_hz: 100.0
+    state_rate_hz: 1000.0
+
+    scan_range_min: 0.05
+    scan_range_max: 40.0
+    scan_angle_min_deg: -135.0
+    scan_angle_max_deg: 135.0
+    scan_angle_increment_deg: 0.12
+
+    scan_noise_std_m: 0.01
+    scan_dropout_ratio: 0.005
+    scan_outlier_ratio: 0.003
+    scan_outlier_max_m: 0.25
+
+    publish_static_tf: false
+    random_seed: 42
+
+    odom_velocity_scale_error: 0.005
+    odom_yaw_rate_bias_deg: 0.1
+    odom_yaw_rate_noise_std_deg: 0.05
+
+    imu_yaw_bias_deg: 0.0
+    imu_ang_vel_bias_deg: 0.05
+    imu_ang_vel_noise_std_deg: 0.03
+
+    speed_modulation_amp: 0.0
+    slip_event_rate: 0.0
+    slip_duration_min_sec: 0.2
+    slip_duration_max_sec: 0.6
+    slip_scale: 0.85
+
+    world_type: map
+    map_yaml_path: /home/tkddn647/test/maps/example_map.yaml
+    centerline_csv_path: ""
+    centerline_auto_align_to_map: true
+    centerline_offset_x_m: 0.0
+    centerline_offset_y_m: 0.0
+    map_path_speed_mps: 50.0
+    map_path_points: 720
+    map_use_pure_pursuit: false
+    map_use_waypoint_heading: false
+    map_waypoint_heading_gain: 4.0
+    map_waypoint_heading_auto_offset: true
+    map_waypoint_heading_offset_rad: 0.0
+    pp_lookahead_m: 2.4
+    pp_lookahead_gain: 0.12
+    pp_max_yaw_rate_radps: 2.0
+    pp_relock_distance_m: 12.0
+    map_min_speed_mps: 3.5
+    map_corner_preview_m: 1.2
+    map_corner_slowdown_gain: 18.0
+    map_max_lateral_accel_mps2: 6.5
+    map_yaw_preview_m: 1.0
