@@ -139,29 +139,39 @@ if _HAS_TORCH:
             return self.A_signed * self.scale * self.topo_mask
 
         def forward(self, x: torch.Tensor, h: torch.Tensor | None = None, n_steps: int = 3):
-            """x: (batch, n_obs) 한 스텝의 관측. n_steps: 내부 적분 스텝 수
-            (관측 한 번에 뇌 안에서 정보가 여러 스텝 확산되도록)."""
+            """x: (batch, n_obs). n_steps: 내부 적분 횟수.
+
+            GPU(CUDA): dense matmul — 소형 서브서킷(N≲512)에서 Tensor 코어에 유리.
+            CPU: sparse matmul — 희소 토폴로지에서 메모리·속도 유리.
+            """
             batch = x.shape[0]
             if h is None:
-                h = torch.zeros(batch, self.n, device=x.device)
+                h = torch.zeros(batch, self.n, device=x.device, dtype=x.dtype)
 
-            drive = torch.zeros(batch, self.n, device=x.device)
+            drive = torch.zeros(batch, self.n, device=x.device, dtype=x.dtype)
             drive[:, self.input_idx] = self.W_in(x)
 
             W_eff = self.effective_weight()
-            # 희소 토폴로지: dense 800×800 matmul 회피 (고속 학습용)
-            if not hasattr(self, "_sparse_idx"):
-                nz = torch.nonzero(self.topo_mask, as_tuple=False)
-                self.register_buffer("_sparse_idx", nz.t().contiguous(), persistent=False)
-            idx = self._sparse_idx
-            vals = W_eff[idx[0], idx[1]]
-            W_sp = torch.sparse_coo_tensor(idx, vals, size=W_eff.shape, device=x.device)
-            W_sp_t = W_sp.transpose(0, 1).coalesce()
-            for _ in range(n_steps):
-                rec_input = torch.sparse.mm(W_sp_t, h.t()).t()
-                pre_act = rec_input + drive
-                target = torch.tanh(pre_act)
-                h = h + (self.dt / self.tau) * (-h + target)
+            use_dense = x.is_cuda or self.n <= 128
+            if use_dense:
+                # (B,N) @ (N,N)^T  equivalent: h @ W_eff  if W_eff maps pre→post via W.T
+                W_t = W_eff.t()
+                for _ in range(n_steps):
+                    rec_input = h @ W_t
+                    target = torch.tanh(rec_input + drive)
+                    h = h + (self.dt / self.tau) * (-h + target)
+            else:
+                if not hasattr(self, "_sparse_idx"):
+                    nz = torch.nonzero(self.topo_mask, as_tuple=False)
+                    self.register_buffer("_sparse_idx", nz.t().contiguous(), persistent=False)
+                idx = self._sparse_idx
+                vals = W_eff[idx[0], idx[1]]
+                W_sp = torch.sparse_coo_tensor(idx, vals, size=W_eff.shape, device=x.device)
+                W_sp_t = W_sp.transpose(0, 1).coalesce()
+                for _ in range(n_steps):
+                    rec_input = torch.sparse.mm(W_sp_t, h.t()).t()
+                    target = torch.tanh(rec_input + drive)
+                    h = h + (self.dt / self.tau) * (-h + target)
 
             y = self.W_out(h[:, self.output_idx])
             return y, h

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import torch
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
@@ -26,6 +27,20 @@ from connectome_loader import (
 )
 from f1tenth_mapless_env import F1TenthMaplessEnv, OBS_DIM, try_official_f1tenth_gym
 from policy_sac_connectome import ConnectomeTemporalFeatures, make_sac_policy_kwargs
+
+
+def resolve_device(name: str) -> str:
+    name = (name or "auto").lower()
+    if name == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+    if name.startswith("cuda") and not torch.cuda.is_available():
+        print("[train] WARN: CUDA 요청했지만 사용 불가 → cpu")
+        return "cpu"
+    return name
 
 
 def build_brain(
@@ -98,19 +113,40 @@ def main():
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--buffer-size", type=int, default=200_000)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="default: 512 on CUDA, 256 on CPU",
+    )
     parser.add_argument("--learning-starts", type=int, default=3_000)
     parser.add_argument("--min-speed", type=float, default=2.0)
     parser.add_argument("--max-speed", type=float, default=3.5)
     parser.add_argument("--max-steer", type=float, default=0.30)
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="auto|cuda|cpu|mps — Jetson/PC GPU면 cuda 권장",
+    )
     args = parser.parse_args()
 
+    device = resolve_device(args.device)
+    if device == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high")
+    batch_size = args.batch_size if args.batch_size is not None else (
+        512 if device == "cuda" else 256
+    )
     learn_connectome = not args.freeze_connectome
     print(f"[train] official_f1tenth_gym={try_official_f1tenth_gym()} (fallback OK)")
-    print(f"[train] obs_dim={OBS_DIM} map={args.map} algo=SAC")
+    print(f"[train] obs_dim={OBS_DIM} map={args.map} algo=SAC device={device}")
+    if device == "cuda":
+        print(f"[train] GPU={torch.cuda.get_device_name(0)}")
     print(
         f"[train] speed=[{args.min_speed},{args.max_speed}] steer={args.max_steer} "
-        f"max_neurons={args.max_neurons} learn_connectome={learn_connectome}"
+        f"max_neurons={args.max_neurons} learn_connectome={learn_connectome} "
+        f"batch={batch_size}"
     )
 
     def _env_fn():
@@ -149,7 +185,7 @@ def main():
             resume_path,
             env=env,
             custom_objects=custom_objects,
-            device="auto",
+            device=device,
         )
         model.set_env(env)
         reset_ts = False
@@ -165,7 +201,7 @@ def main():
             policy_kwargs=policy_kwargs,
             learning_rate=args.learning_rate,
             buffer_size=args.buffer_size,
-            batch_size=args.batch_size,
+            batch_size=batch_size,
             learning_starts=args.learning_starts,
             gamma=0.99,
             tau=0.005,
@@ -175,7 +211,7 @@ def main():
             target_entropy=-1.0,
             verbose=1,
             seed=args.seed,
-            device="auto",
+            device=device,
         )
         reset_ts = True
 

@@ -138,21 +138,23 @@ class ConnectomeTemporalFeatures(BaseFeaturesExtractor):
         lidar = observations[:, :LIDAR_DIM].reshape(b, self.hist_len, self.n_beams)
         yaw = observations[:, LIDAR_DIM:]
 
-        z_list = []
+        # GPU-friendly: encode all T frames in one batched Conv1d
+        lidar_bt = lidar.reshape(b * self.hist_len, self.n_beams)
+        z_l = self.lidar_enc(lidar_bt).reshape(b, self.hist_len, -1)
+        z_i = self.imu_enc(yaw.reshape(b * self.hist_len, 1)).reshape(b, self.hist_len, -1)
+        z = torch.cat([z_l, z_i], dim=-1)  # (B, T, enc)
+
         h = None
         y = None
         for t in range(self.hist_len):
-            z_l = self.lidar_enc(lidar[:, t, :])
-            z_i = self.imu_enc(yaw[:, t])
-            z_t = torch.cat([z_l, z_i], dim=-1)
-            z_list.append(z_t)
+            z_t = z[:, t, :]
             if self.learn_connectome:
                 y, h = self.brain(z_t, h=h, n_steps=self.n_inner_steps)
             else:
                 with torch.no_grad():
                     y, h = self.brain(z_t.detach(), h=h, n_steps=self.n_inner_steps)
 
-        feat = torch.stack(z_list, dim=1).mean(dim=1)
+        feat = z.mean(dim=1)
         assert y is not None
         return self.fuse(torch.cat([self.skip(feat), y], dim=-1))
 
