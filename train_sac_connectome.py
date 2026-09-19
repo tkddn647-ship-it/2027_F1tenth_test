@@ -13,7 +13,6 @@ from pathlib import Path
 
 import torch
 from stable_baselines3 import SAC
-from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
 
@@ -27,6 +26,7 @@ from connectome_loader import (
 )
 from f1tenth_mapless_env import F1TenthMaplessEnv, OBS_DIM, try_official_f1tenth_gym
 from policy_sac_connectome import ConnectomeTemporalFeatures, make_sac_policy_kwargs
+from train_callbacks import make_train_callbacks
 
 
 def resolve_device(name: str) -> str:
@@ -77,22 +77,6 @@ def build_brain(
         f"density={100.0 * (A_signed != 0).mean():.4f}%"
     )
     return A_signed, input_idx, output_idx
-
-
-class ProgressLogger(BaseCallback):
-    def __init__(self):
-        super().__init__()
-        self.laps = 0
-
-    def _on_step(self) -> bool:
-        for info in self.locals.get("infos", []):
-            if info.get("lap_completed"):
-                self.laps += 1
-                print(
-                    f"[lap] n={self.laps} time={info.get('lap_time')} "
-                    f"map={info.get('track_name')}"
-                )
-        return True
 
 
 def main():
@@ -208,24 +192,32 @@ def main():
             train_freq=4,
             gradient_steps=4,
             ent_coef="auto",
-            target_entropy=-1.0,
+            # default target_entropy = -|A| = -2 (노이즈 과다 방지)
             verbose=1,
             seed=args.seed,
             device=device,
         )
         reset_ts = True
 
+    log_dir = Path(f"runs/connectome_{args.map}")
+    callbacks = make_train_callbacks(
+        _env_fn, log_dir, n_envs=args.n_envs, seed=args.seed
+    )
     n_train = sum(p.numel() for p in model.policy.parameters() if p.requires_grad)
     n_all = sum(p.numel() for p in model.policy.parameters())
     print(f"[train] params trainable={n_train:,} / all={n_all:,} timesteps={args.timesteps}")
+    print(f"[train] logs/best → {log_dir}")
     model.learn(
         total_timesteps=args.timesteps,
-        callback=ProgressLogger(),
+        callback=callbacks,
         reset_num_timesteps=reset_ts,
     )
     model.save(save_path)
-    print(f"[train] saved {save_path}")
-    print(f"watch: python watch_sac_f1tenth.py --model {save_path} --map {args.map} --use-cache")
+    best = log_dir / "best" / "best_model.zip"
+    if best.exists():
+        print(f"[train] best eval model: {best}")
+    print(f"[train] saved last {save_path}")
+    print(f"watch: python watch_sac_f1tenth.py --model {best if best.exists() else save_path} --map {args.map} --use-cache")
 
 
 if __name__ == "__main__":

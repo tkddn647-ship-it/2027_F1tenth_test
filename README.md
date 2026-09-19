@@ -9,8 +9,10 @@
 | 알고리즘 | **SAC** + ConnectomeRNN (학습) | plain MLP SAC / PPO |
 | Env | `f1tenth_mapless_env.py` | `lidar_race_env.py` (ajou PPO) |
 | 관측 | LiDAR 135×5 + yaw×5 → **680** | dim 82 (레거시) |
+| LiDAR 시뮬 | **40 m / 40 Hz** (실차), 제어 frame_skip=4 → **~10 Hz** | — |
 | 보상 | privileged CL progress (관측은 mapless) | mapless LiDAR+odom |
 | 디바이스 | `--device auto\|cuda` (Jetson GPU) | CPU 가능 |
+| 체크포인트 | `EvalCallback`(deterministic) + `best_model` + periodic ckpt | — |
 
 ```bash
 # GPU 있으면 자동 cuda (Jetson / PC)
@@ -44,6 +46,21 @@ python watch_sac_f1tenth.py --model connectome_sac_f1tenth_Spielberg.zip --map S
 | 커넥톰? | LSTM 역할의 **고정 배선 RNN 메모리** (scale/\(W_{in}\) 학습) |
 | 인코더? | 원시 센서를 짧은 벡터로 압축 (아래 개념 절) |
 | Jetson? | `device=cuda`, dense matmul, 배치 인코딩으로 **GPU 비중↑** |
+
+### 타이밍 (실차 정렬 · 학습 안정)
+
+| | 값 | 이유 |
+|--|-----|------|
+| LiDAR 주기 | **40 Hz** (`DT=0.025`) | 실차 측정 주기 |
+| 거리 상한 | **40 m** | 실차 range |
+| 레이 샘플 | 맵 `resolution`(~5 cm) | 얇은 벽 관통 방지 |
+| `frame_skip` | **4** → 제어 **~10 Hz** | 50→10 Hz로 행동 차이·히스토리 정보량 확보 |
+| 히스토리 5프레임 | span ≈ **0.4 s** | skip 간격으로 스택 (예전 0.08 s) |
+| 스폰 | CL **전체** + 헤딩/횡 노이즈 | 직선만 버퍼에 쌓이는 것 방지 |
+| 랩 | `truncate` + 보너스 20 (terminate 아님) | Q 절벽 완화 |
+| 학습 저장 | `runs/*/best`, `checkpoints` | 피크 모델 보존 |
+
+A/B: **먼저** `train_sac_plain.py` (Eval deterministic). plain도 무너지면 env/SAC, plain만 안정이면 커넥톰.
 
 ---
 
