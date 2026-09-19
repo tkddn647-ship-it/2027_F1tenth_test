@@ -1,9 +1,9 @@
 """
 train_sac_connectome.py
 =======================
-SAC + LiDAR/IMU encoders + ConnectomeRNN temporal memory.
+SAC + LiDAR/IMU encoders + ConnectomeRNN temporal memory (학습).
 
-  python train_sac_connectome.py --use-cache --map Spielberg --timesteps 300000
+  python train_sac_connectome.py --use-cache --map Spielberg --timesteps 200000 --fresh
 """
 
 from __future__ import annotations
@@ -11,8 +11,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import numpy as np
-import torch.nn as nn
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
@@ -30,7 +28,15 @@ from f1tenth_mapless_env import F1TenthMaplessEnv, OBS_DIM, try_official_f1tenth
 from policy_sac_connectome import ConnectomeTemporalFeatures, make_sac_policy_kwargs
 
 
-def build_brain(n_neurons, real_token, use_cache, cache_dir, seed, use_subcircuit, refresh_cache):
+def build_brain(
+    n_neurons,
+    real_token,
+    use_cache,
+    cache_dir,
+    seed,
+    use_subcircuit,
+    max_neurons,
+):
     if use_cache:
         print("[train] hemibrain cache")
         neurons_df, conn_df = load_hemibrain_cache(cache_dir)
@@ -42,7 +48,9 @@ def build_brain(n_neurons, real_token, use_cache, cache_dir, seed, use_subcircui
         neurons_df, conn_df = build_synthetic_hemibrain(n_neurons=n_neurons, seed=seed)
 
     if use_subcircuit:
-        neurons_df, conn_df = select_speed_relevant_subcircuit(neurons_df, conn_df)
+        neurons_df, conn_df = select_speed_relevant_subcircuit(
+            neurons_df, conn_df, max_neurons=max_neurons
+        )
         neurons_df = neurons_df.reset_index(drop=True)
 
     input_idx, output_idx = identify_io_neurons(neurons_df)
@@ -75,15 +83,16 @@ class ProgressLogger(BaseCallback):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--map", type=str, default="Spielberg")
-    parser.add_argument("--timesteps", type=int, default=300_000)
-    parser.add_argument("--n-envs", type=int, default=4)
+    parser.add_argument("--timesteps", type=int, default=200_000)
+    parser.add_argument("--n-envs", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--use-cache", action="store_true")
     parser.add_argument("--cache-dir", type=str, default="hemibrain_cache")
-    parser.add_argument("--refresh-cache", action="store_true")
     parser.add_argument("--real-token", type=str, default=None)
-    parser.add_argument("--n-neurons", type=int, default=800)
+    parser.add_argument("--n-neurons", type=int, default=256)
+    parser.add_argument("--max-neurons", type=int, default=256)
     parser.add_argument("--no-subcircuit", action="store_true")
+    parser.add_argument("--freeze-connectome", action="store_true")
     parser.add_argument("--save-path", type=str, default=None)
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--resume", type=str, default=None)
@@ -92,13 +101,17 @@ def main():
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--learning-starts", type=int, default=3_000)
     parser.add_argument("--min-speed", type=float, default=2.0)
-    parser.add_argument("--max-speed", type=float, default=4.0)
+    parser.add_argument("--max-speed", type=float, default=3.5)
     parser.add_argument("--max-steer", type=float, default=0.30)
     args = parser.parse_args()
 
-    print(f"[train] official_f1tenth_gym={try_official_f1tenth_gym()} (fallback racetracks OK)")
+    learn_connectome = not args.freeze_connectome
+    print(f"[train] official_f1tenth_gym={try_official_f1tenth_gym()} (fallback OK)")
     print(f"[train] obs_dim={OBS_DIM} map={args.map} algo=SAC")
-    print(f"[train] speed=[{args.min_speed},{args.max_speed}] steer={args.max_steer}")
+    print(
+        f"[train] speed=[{args.min_speed},{args.max_speed}] steer={args.max_steer} "
+        f"max_neurons={args.max_neurons} learn_connectome={learn_connectome}"
+    )
 
     def _env_fn():
         return Monitor(
@@ -120,9 +133,11 @@ def main():
         args.cache_dir,
         args.seed,
         use_subcircuit=not args.no_subcircuit,
-        refresh_cache=args.refresh_cache,
+        max_neurons=args.max_neurons,
     )
-    policy_kwargs = make_sac_policy_kwargs(A_signed, input_idx, output_idx)
+    policy_kwargs = make_sac_policy_kwargs(
+        A_signed, input_idx, output_idx, learn_connectome=learn_connectome
+    )
     custom_objects = {"ConnectomeTemporalFeatures": ConnectomeTemporalFeatures}
 
     save_path = args.save_path or f"connectome_sac_f1tenth_{args.map}.zip"
@@ -143,7 +158,7 @@ def main():
             bak = Path(save_path).with_suffix(".bak.zip")
             Path(save_path).replace(bak)
             print(f"[train] fresh: moved old -> {bak.name}")
-        print("[train] fresh SAC start")
+        print("[train] fresh SAC + temporal ConnectomeRNN")
         model = SAC(
             "MlpPolicy",
             env,
@@ -154,8 +169,8 @@ def main():
             learning_starts=args.learning_starts,
             gamma=0.99,
             tau=0.005,
-            train_freq=1,
-            gradient_steps=1,
+            train_freq=4,
+            gradient_steps=4,
             ent_coef="auto",
             target_entropy=-1.0,
             verbose=1,
@@ -164,8 +179,9 @@ def main():
         )
         reset_ts = True
 
-    n_params = sum(p.numel() for p in model.policy.parameters())
-    print(f"[train] params={n_params:,} timesteps={args.timesteps}")
+    n_train = sum(p.numel() for p in model.policy.parameters() if p.requires_grad)
+    n_all = sum(p.numel() for p in model.policy.parameters())
+    print(f"[train] params trainable={n_train:,} / all={n_all:,} timesteps={args.timesteps}")
     model.learn(
         total_timesteps=args.timesteps,
         callback=ProgressLogger(),

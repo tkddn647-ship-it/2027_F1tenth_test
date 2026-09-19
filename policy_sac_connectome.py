@@ -1,12 +1,12 @@
 """
 policy_sac_connectome.py
 ========================
-SAC policy features:
-  LiDAR Encoder (1D Conv) + IMU Encoder (MLP)
-  → ConnectomeRNN as temporal memory over 5-frame window
-  → features for SAC actor/critic heads
+SAC features:
+  LiDAR Encoder + IMU Encoder
+  → ConnectomeRNN temporal memory (5-frame unroll, learnable scale/W_in)
+  → skip MLP ‖ DN → fuse → SAC actor/critic
 
-고속 성능 우선: 인코더는 성능형, 커넥톰은 토폴로지 prior + temporal mixing.
+A_signed 토폴로지는 고정. scale·W_in·인코더·skip·fuse·π/Q 는 학습.
 """
 
 from __future__ import annotations
@@ -28,8 +28,6 @@ OBS_DIM = LIDAR_DIM + YAW_DIM
 
 
 class LidarEncoder(nn.Module):
-    """Per-frame 1D conv over 135 beams; stack 5 frames as channels when fused later."""
-
     def __init__(self, n_beams: int = N_BEAMS, out_dim: int = 64):
         super().__init__()
         self.n_beams = n_beams
@@ -46,7 +44,6 @@ class LidarEncoder(nn.Module):
         self.out_dim = out_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 135) or (B, 1, 135)
         if x.dim() == 2:
             x = x.unsqueeze(1)
         return self.net(x)
@@ -71,8 +68,12 @@ class IMUEncoder(nn.Module):
 
 class ConnectomeTemporalFeatures(BaseFeaturesExtractor):
     """
-    Obs layout: [lidar_0..lidar_4 (each 135), yaw_0..yaw_4]
-    LiDAR/IMU encoders → (skip MLP ‖ ConnectomeRNN) → fused features for SAC.
+    Obs: [lidar_0..lidar_4 (135 each), yaw_0..yaw_4]
+
+    For t = 0..4 (oldest → newest):
+      z_t = [LidarEnc(lidar_t); IMUEnc(yaw_t)]
+      y_t, h_t = ConnectomeRNN(z_t, h_{t-1}, n_inner_steps)
+    features = fuse( skip(mean z) ‖ y_4 )
     """
 
     def __init__(
@@ -81,10 +82,11 @@ class ConnectomeTemporalFeatures(BaseFeaturesExtractor):
         A_signed: np.ndarray,
         input_idx: np.ndarray,
         output_idx: np.ndarray,
-        lidar_out: int = 64,
+        lidar_out: int = 48,
         imu_out: int = 16,
-        n_inner_steps: int = 2,
+        n_inner_steps: int = 1,
         fuse_dim: int = 256,
+        learn_connectome: bool = True,
     ):
         dn_dim = len(output_idx)
         enc_dim = lidar_out + imu_out
@@ -92,6 +94,9 @@ class ConnectomeTemporalFeatures(BaseFeaturesExtractor):
 
         self.n_beams = N_BEAMS
         self.hist_len = HIST_LEN
+        self.n_inner_steps = n_inner_steps
+        self.learn_connectome = learn_connectome
+
         self.lidar_enc = LidarEncoder(N_BEAMS, lidar_out)
         self.imu_enc = IMUEncoder(1, imu_out)
 
@@ -104,13 +109,16 @@ class ConnectomeTemporalFeatures(BaseFeaturesExtractor):
             dt=1.0,
             tau=3.0,
         )
+        # DN activations as features (no extra W_out projection to act dim)
         self.brain.W_out = nn.Identity()
-        self.n_inner_steps = n_inner_steps
-        # Fixed connectome prior: topology features without unstable scale grads
-        for p in self.brain.parameters():
-            p.requires_grad = False
+        # milder scale init for stable early grads
+        with torch.no_grad():
+            self.brain.scale.fill_(0.02)
 
-        # primary learnable path (must be strong enough to drive)
+        if not learn_connectome:
+            for p in self.brain.parameters():
+                p.requires_grad = False
+
         self.skip = nn.Sequential(
             nn.Linear(enc_dim, 128),
             nn.ReLU(inplace=True),
@@ -131,13 +139,21 @@ class ConnectomeTemporalFeatures(BaseFeaturesExtractor):
         yaw = observations[:, LIDAR_DIM:]
 
         z_list = []
+        h = None
+        y = None
         for t in range(self.hist_len):
             z_l = self.lidar_enc(lidar[:, t, :])
             z_i = self.imu_enc(yaw[:, t])
-            z_list.append(torch.cat([z_l, z_i], dim=-1))
+            z_t = torch.cat([z_l, z_i], dim=-1)
+            z_list.append(z_t)
+            if self.learn_connectome:
+                y, h = self.brain(z_t, h=h, n_steps=self.n_inner_steps)
+            else:
+                with torch.no_grad():
+                    y, h = self.brain(z_t.detach(), h=h, n_steps=self.n_inner_steps)
+
         feat = torch.stack(z_list, dim=1).mean(dim=1)
-        with torch.no_grad():
-            y, _h = self.brain(feat.detach(), h=None, n_steps=max(3, self.n_inner_steps))
+        assert y is not None
         return self.fuse(torch.cat([self.skip(feat), y], dim=-1))
 
 
@@ -146,6 +162,7 @@ def make_sac_policy_kwargs(
     input_idx: np.ndarray,
     output_idx: np.ndarray,
     net_arch: list | dict | None = None,
+    learn_connectome: bool = True,
 ) -> dict:
     if net_arch is None:
         net_arch = dict(pi=[256, 256], qf=[256, 256])
@@ -156,17 +173,16 @@ def make_sac_policy_kwargs(
             A_signed=A_signed,
             input_idx=input_idx,
             output_idx=output_idx,
-            lidar_out=64,
+            lidar_out=48,
             imu_out=16,
             n_inner_steps=1,
             fuse_dim=256,
+            learn_connectome=learn_connectome,
         ),
         net_arch=net_arch,
     )
 
 
 class ConnectomeSACPolicy(SACPolicy):
-    """Thin wrapper so zip load can resolve the policy class name."""
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
