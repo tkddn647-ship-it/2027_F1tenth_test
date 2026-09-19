@@ -149,8 +149,16 @@ if _HAS_TORCH:
             drive[:, self.input_idx] = self.W_in(x)
 
             W_eff = self.effective_weight()
+            # 희소 토폴로지: dense 800×800 matmul 회피 (고속 학습용)
+            if not hasattr(self, "_sparse_idx"):
+                nz = torch.nonzero(self.topo_mask, as_tuple=False)
+                self.register_buffer("_sparse_idx", nz.t().contiguous(), persistent=False)
+            idx = self._sparse_idx
+            vals = W_eff[idx[0], idx[1]]
+            W_sp = torch.sparse_coo_tensor(idx, vals, size=W_eff.shape, device=x.device)
+            W_sp_t = W_sp.transpose(0, 1).coalesce()
             for _ in range(n_steps):
-                rec_input = h @ W_eff  # (batch,n) @ (n,n) -> (batch,n), A[i,j]: i->j
+                rec_input = torch.sparse.mm(W_sp_t, h.t()).t()
                 pre_act = rec_input + drive
                 target = torch.tanh(pre_act)
                 h = h + (self.dt / self.tau) * (-h + target)

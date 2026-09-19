@@ -6,16 +6,17 @@ Roboracer-2026 (실차 스택) 인터페이스에 맞춘 LiDAR 레이싱 시뮬.
 실차 파이프라인과의 대응:
   /scan  (LaserScan)     ↔  occupancy 레이캐스트 LiDAR
   /drive (Ackermann)     ↔  action = [steering_norm, speed_norm]
-  map yaml+png           ↔  Cartographer / f1tenth_racetracks 맵
-  centerline.csv         ↔  채점용만 (관측 X) — Stanley가 쓰는 CSV와 동일 계열
+  map yaml+png           ↔  시뮬 occupancy만 (에이전트 입력 아님)
 
-mapless 관측: LiDAR + v + yaw_rate 만 (맵/센터라인 입력 X).
-보상: 한 바퀴 목표를 위해 센터라인 진행은 privileged 보상으로만 사용.
-센터라인 CSV는 관측이 아니라 랩 학습·채점용.
-커넥톰 정책은 실차에서 stanley_waypoint_follow 대신 /drive 드롭인.
+mapless ONLY:
+  관측: LiDAR 히스토리(40Hz→5Hz 스택) + v + yaw_rate
+  보상: 최장 LiDAR 방향 정렬 × 이동 × 속도  (맵/센터라인 금지)
+  스폰: 하단 가로 직선 구간
+  속도: 2~7 m/s (fix_speed=False)
 """
 
 from __future__ import annotations
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -37,7 +38,6 @@ ROOT = Path(__file__).resolve().parent
 MAPS_DIR = ROOT / "maps"
 RACETRACKS_DIR = ROOT / "f1tenth_racetracks"
 ROBORACER_MAPS = ROOT / "Roboracer-2026-main" / "maps"
-ROBORACER_CFG = ROOT / "Roboracer-2026-main" / "src" / "path_following" / "config"
 
 # 실차 stanley CFG와 맞춤 (대략)
 MAX_STEER_RAD = 0.3735   # 실측 전륜각 ±21.4°
@@ -114,61 +114,19 @@ def load_occupancy(map_yaml: Path):
     return occupied, float(meta["resolution"]), meta["origin"], meta, img_path
 
 
-def _read_xy_csv(path: Path) -> np.ndarray | None:
-    try:
-        raw = np.genfromtxt(path, delimiter=",", comments="#")
-        if raw.ndim == 1:
-            return None
-        xy = raw[:, :2].astype(np.float64)
-        xy = xy[np.isfinite(xy).all(axis=1)]
-        if len(xy) < 20:
-            return None
-        if len(xy) > 500:
-            idx = np.linspace(0, len(xy) - 1, 500).astype(int)
-            xy = xy[idx]
-        return xy
-    except Exception:
-        return None
-
-
-def load_centerline_for_scoring(map_yaml: Path) -> np.ndarray | None:
-    """채점용 centerline. 맵 stem 전용 CSV → 맵 폴더 → 실차 config."""
-    stem = map_yaml.stem
-    preferred = [
-        map_yaml.parent / f"{stem}_centerline.csv",
-        map_yaml.parent / f"{stem}_raceline.csv",
-        map_yaml.parent / "centerline.csv",
-        ROBORACER_CFG / "centerline.csv",
-        ROOT / "Roboracer-2026-main" / "src" / "race_pkg" / "config" / "centerline.csv",
-    ]
-    for c in preferred:
-        if c.exists():
-            xy = _read_xy_csv(c)
-            if xy is not None:
-                print(f"[lidar_race] scoring centerline: {c.name} ({len(xy)} pts)")
-                return xy
-
-    for folder in (map_yaml.parent, ROBORACER_CFG):
-        if not folder.exists():
-            continue
-        for pat in ("*centerline*.csv", "*raceline*.csv"):
-            for c in sorted(folder.glob(pat)):
-                xy = _read_xy_csv(c)
-                if xy is not None:
-                    print(f"[lidar_race] scoring centerline: {c.name} ({len(xy)} pts)")
-                    return xy
-    return None
-
-
 class LidarRaceEnv(_EnvBase):
     """실차 /scan + /drive 와 맞춘 Gym 환경."""
 
     N_RAYS = 20          # 실차 LaserScan 다운샘플
     RAY_RANGE = 8.0
     FOV = 4.71238898     # 270 deg (sllidar 계열과 유사)
-    DT = 0.05            # 20 Hz (실차 stanley 주기와 비슷한 스케일)
-    MAX_STEPS = 8000
+    DT = 0.025           # 40 Hz — 실차 LiDAR 주기와 맞춤
+    MAX_STEPS = 16000    # ≈ 400 s (이전 20Hz×8000과 동일 시간)
     WHEELBASE = 0.33
+    # 과거 LiDAR: 40Hz 스트림에서 5Hz로 서브샘플 → 움직임 추정
+    LIDAR_HZ = 40
+    HIST_FPS = 5
+    HIST_LEN = 4         # 0.6 s lookback
 
     def __init__(
         self,
@@ -177,24 +135,29 @@ class LidarRaceEnv(_EnvBase):
         min_speed_mps: float = MIN_SPEED_MPS,
         max_speed_mps: float = MAX_SPEED_MPS,
         max_steer_rad: float = MAX_STEER_RAD,
+        fix_speed: bool = False,
     ):
         self.map_yaml = resolve_map_yaml(map_name)
         self.map_name = self.map_yaml.stem
         self.occ, self.resolution, self.origin, self.meta, self.map_png = load_occupancy(self.map_yaml)
         self.h, self.w = self.occ.shape
-        self.centerline = load_centerline_for_scoring(self.map_yaml)
+        self.centerline = None  # mapless: 센터라인 미로드·미사용
         self.rng = np.random.default_rng(seed)
         self.MIN_SPEED = float(min_speed_mps)
         self.MAX_SPEED = float(max_speed_mps)
         if self.MAX_SPEED <= self.MIN_SPEED:
             raise ValueError("max_speed_mps must be > min_speed_mps")
         self.MAX_STEER = float(max_steer_rad)
+        self.fix_speed = bool(fix_speed)
         self._speed_span = self.MAX_SPEED - self.MIN_SPEED
+        self._hist_interval = max(1, int(round(self.LIDAR_HZ / self.HIST_FPS)))
+        self._lidar_hist: deque[np.ndarray] = deque(maxlen=self.HIST_LEN)
+        self._obs_dim = self.N_RAYS * self.HIST_LEN + 2
 
         if _HAS_GYM:
-            dim = self.N_RAYS + 2
-            self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(dim,), dtype=np.float32)
-            # [steering_norm, speed_norm] → 실차 AckermannDrive.steering_angle / .speed
+            self.observation_space = spaces.Box(
+                low=-1.0, high=1.0, shape=(self._obs_dim,), dtype=np.float32
+            )
             self.action_space = spaces.Box(
                 low=np.array([-1.0, 0.0], dtype=np.float32),
                 high=np.array([1.0, 1.0], dtype=np.float32),
@@ -204,13 +167,26 @@ class LidarRaceEnv(_EnvBase):
         self.x = self.y = self.theta = self.v = 0.0
         self.yaw_rate = 0.0
         self.steps = 0
-        self.cl_idx = 0
-        self._progress_acc = 0
+        self._dist_acc = 0.0
         self.lap_completed = False
         self.last_steer = 0.0
         self.last_speed_cmd = 0.0
-        self._start_pose = self._find_start_pose()
-        print(f"[lidar_race] map={self.map_yaml} size={self.w}x{self.h} res={self.resolution}")
+        self._steer_filt = 0.0
+        self.spawn_mode = "straight"  # straight: 고정 직선 스폰 / random: 매 에피소드 재샘플
+        self._start_pose = self._sample_start_pose()
+        print(
+            f"[lidar_race] MAPLESS map={self.map_yaml.name} "
+            f"{self.w}x{self.h} res={self.resolution} "
+            f"obs={self._obs_dim} lidar={self.LIDAR_HZ}Hz hist={self.HIST_LEN}@{self.HIST_FPS}Hz "
+            f"fix_speed={self.fix_speed}"
+        )
+
+    def set_spawn_mode(self, mode: str) -> None:
+        if mode not in ("straight", "random"):
+            raise ValueError(f"spawn_mode must be straight|random, got {mode}")
+        if mode != self.spawn_mode:
+            print(f"[lidar_race] spawn_mode: {self.spawn_mode} -> {mode}")
+        self.spawn_mode = mode
 
     def world_to_pixel(self, x: float, y: float) -> tuple[int, int]:
         ox, oy = float(self.origin[0]), float(self.origin[1])
@@ -233,24 +209,72 @@ class LidarRaceEnv(_EnvBase):
                 return True
         return False
 
-    def _find_start_pose(self) -> np.ndarray:
-        if self.centerline is not None:
-            for i in range(0, len(self.centerline), max(1, len(self.centerline) // 40)):
-                x, y = self.centerline[i]
-                if not self.is_occupied(x, y, inflate=0.2):
-                    nxt = self.centerline[(i + 5) % len(self.centerline)]
-                    th = float(np.arctan2(nxt[1] - y, nxt[0] - x))
-                    return np.array([x, y, th], dtype=np.float64)
+    def _ray_clear(self, x: float, y: float, th: float, max_dist: float = 6.0) -> float:
+        ca, sa = np.cos(th), np.sin(th)
+        clear = 0.0
+        for dist in np.linspace(0.15, max_dist, 40):
+            if self.is_occupied(x + dist * ca, y + dist * sa, 0.10):
+                return dist
+            clear = dist
+        return clear
+
+    def _sample_start_pose(self) -> np.ndarray:
+        """하단 긴 가로 직선 구간, 차로 중앙, 직선 방향 헤딩."""
         free = np.argwhere(~self.occ)
+        if len(free) == 0:
+            raise RuntimeError("free 셀 없음")
+        oy = float(self.origin[1])
+        map_h_m = self.h * self.resolution
+        # 맵 이미지 하단 = 낮은 y (유저가 가리킨 긴 가로 직선)
+        y_hi = oy + 0.38 * map_h_m
+        # 가로 직선만: 0° / 180°
+        headings = (0.0, np.pi)
+        best = None
+        best_score = -1.0
         self.rng.shuffle(free)
-        for row, col in free[:8000]:
+        for row, col in free[:15000]:
             x, y = self.pixel_to_world(int(row), int(col))
-            if self.is_occupied(x, y, 0.25):
+            if y > y_hi:
                 continue
-            for th in np.linspace(0, 2 * np.pi, 16, endpoint=False):
-                if not self.is_occupied(x + 0.8 * np.cos(th), y + 0.8 * np.sin(th), 0.12):
-                    return np.array([x, y, th], dtype=np.float64)
-        raise RuntimeError("시작 포즈를 찾지 못함 — 맵 free 공간 확인")
+            if self.is_occupied(x, y, 0.18):
+                continue
+            for th in headings:
+                fwd = self._ray_clear(x, y, th, 8.0)
+                if fwd < 4.0:
+                    continue
+                left = self._ray_clear(x, y, th + np.pi / 2, 1.5)
+                right = self._ray_clear(x, y, th - np.pi / 2, 1.5)
+                width = left + right
+                if width < 0.50 or width > 1.60:
+                    continue
+                center = 1.0 - abs(left - right) / max(width, 1e-3)
+                if center < 0.55:
+                    continue
+                # 가장 긴 직선 + 중앙
+                score = fwd * 3.0 + center * 2.0
+                if score > best_score:
+                    best_score = score
+                    mid_off = 0.5 * (right - left)
+                    nx = x + mid_off * np.cos(th - np.pi / 2)
+                    ny = y + mid_off * np.sin(th - np.pi / 2)
+                    if self.is_occupied(nx, ny, 0.16):
+                        nx, ny = x, y
+                    best = np.array([nx, ny, float(th)], dtype=np.float64)
+            if best_score >= 20.0:
+                break
+        if best is None:
+            raise RuntimeError("하단 가로 직선 스폰을 찾지 못함")
+        print(
+            f"[lidar_race] bottom-straight spawn "
+            f"({best[0]:.2f},{best[1]:.2f}) th={np.degrees(best[2]):.0f}deg "
+            f"score={best_score:.1f}"
+        )
+        return best
+
+    def _find_start_pose(self) -> np.ndarray:
+        if self.spawn_mode == "straight" and self._start_pose is not None:
+            return self._start_pose.copy()
+        return self._sample_start_pose()
 
     def _cast_lidar(self) -> np.ndarray:
         half = self.FOV / 2.0
@@ -264,29 +288,24 @@ class LidarRaceEnv(_EnvBase):
                     break
         return dists
 
+    def _push_lidar_hist(self, d_norm: np.ndarray, force: bool = False) -> None:
+        if force or (self.steps % self._hist_interval == 0) or len(self._lidar_hist) == 0:
+            self._lidar_hist.append(np.asarray(d_norm, dtype=np.float32).copy())
+            while len(self._lidar_hist) < self.HIST_LEN:
+                self._lidar_hist.appendleft(self._lidar_hist[0].copy())
+
     def _get_obs(self) -> np.ndarray:
         d = self._cast_lidar() / self.RAY_RANGE
-        # 속도: [MIN, MAX] → [0, 1]
-        v_norm = (self.v - self.MIN_SPEED) / self._speed_span
+        self._push_lidar_hist(d)
+        hist = np.concatenate(list(self._lidar_hist), axis=0)
+        v_norm = (self.v - self.MIN_SPEED) / max(self._speed_span, 1e-6)
         return np.concatenate([
-            d,
+            hist,
             [float(np.clip(v_norm, 0, 1))],
             [np.clip(self.yaw_rate / 3.0, -1, 1)],
         ]).astype(np.float32)
 
-    def _nearest_cl(self, pos: np.ndarray) -> int:
-        if self.centerline is None:
-            return 0
-        n = len(self.centerline)
-        cand = (self.cl_idx + np.arange(-5, 25)) % n
-        d = np.linalg.norm(self.centerline[cand] - pos, axis=1)
-        return int(cand[np.argmin(d)])
-
     def action_to_ackermann(self, action) -> tuple[float, float]:
-        """정규화 행동 → (steering_angle_rad, speed_mps) = 실차 /drive.
-
-        action[1] ∈ [0,1] → speed ∈ [MIN_SPEED, MAX_SPEED] (기본 2~7 m/s)
-        """
         steer = float(np.clip(action[0], -1, 1)) * self.MAX_STEER
         u = float(np.clip(action[1], 0, 1))
         speed = self.MIN_SPEED + u * self._speed_span
@@ -295,31 +314,36 @@ class LidarRaceEnv(_EnvBase):
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         if seed is not None:
             self.rng = np.random.default_rng(seed)
-            self._start_pose = self._find_start_pose()
-        pose = self._start_pose.copy()
         if options and "pose" in options:
             pose = np.asarray(options["pose"], dtype=np.float64)
+        else:
+            self._start_pose = self._find_start_pose()
+            pose = self._start_pose.copy()
         self.x, self.y, self.theta = map(float, pose)
-        self.v = self.MIN_SPEED  # 정지 없음
+        self.v = self.MIN_SPEED
         self.yaw_rate = 0.0
         self.steps = 0
-        self.lap_completed = False
-        self._progress_acc = 0
+        self._dist_acc = 0.0
         self.last_steer = 0.0
         self.last_speed_cmd = self.MIN_SPEED
-        self.cl_idx = self._nearest_cl(np.array([self.x, self.y])) if self.centerline is not None else 0
+        self._steer_filt = 0.0
+        self._lidar_hist.clear()
         obs = self._get_obs()
-        info = {"map": self.map_name, "map_yaml": str(self.map_yaml)}
+        info = {"map": self.map_name, "map_yaml": str(self.map_yaml), "reward_mode": "mapless"}
         return (obs, info) if _HAS_GYM else obs
 
     def step(self, action):
+        prev_x, prev_y = self.x, self.y
         steer, speed_cmd = self.action_to_ackermann(action)
+        if self.fix_speed:
+            speed_cmd = self.MIN_SPEED
+        self._steer_filt = 0.7 * self._steer_filt + 0.3 * steer
+        steer = self._steer_filt
         self.last_steer, self.last_speed_cmd = steer, speed_cmd
         prev_th = self.theta
 
-        # bicycle: R = L/tan(δ). (이전 0.5*tan 모델은 회전반경이 약 2배 → 코너 불가)
         self.v = float(np.clip(
-            self.v + 0.35 * (speed_cmd - self.v),
+            self.v + 0.4 * (speed_cmd - self.v),
             self.MIN_SPEED,
             self.MAX_SPEED,
         ))
@@ -330,60 +354,46 @@ class LidarRaceEnv(_EnvBase):
         self.yaw_rate = (self.theta - prev_th) / self.DT
         self.steps += 1
 
-        collided = self.is_occupied(self.x, self.y, inflate=0.14)
-
-        # 진행도(센터라인): 관측에는 안 넣음. 한 바퀴 학습용 privileged 보상만.
-        delta = 0
-        if self.centerline is not None and not collided:
-            new_idx = self._nearest_cl(np.array([self.x, self.y]))
-            delta = new_idx - self.cl_idx
-            n = len(self.centerline)
-            if delta < -n / 2:
-                delta += n
-            elif delta > n / 2:
-                delta -= n
-            self.cl_idx = new_idx
-            self._progress_acc += max(delta, 0)
-            if self._progress_acc >= n - 3:
-                self.lap_completed = True
+        collided = self.is_occupied(self.x, self.y, inflate=0.10)
+        moved = float(np.hypot(self.x - prev_x, self.y - prev_y))
+        if not collided:
+            self._dist_acc += moved
 
         scans = self._cast_lidar() / self.RAY_RANGE
-        mid = float(scans[7:13].mean())
-        front = float(scans[9:11].mean())
-        v_norm = (self.v - self.MIN_SPEED) / self._speed_span
-        # 관측 = LiDAR only. 보상 = 진행(랩) + 속도 + 여유
-        reward = (
-            2.5 * float(max(delta, 0))             # 앞으로 나가라 (한 바퀴 핵심)
-            + 1.0 * v_norm                         # 느린 고착(2m/s) 방지
-            + 0.6 * mid
-            + 0.4 * min(front, 0.5)
-        )
-        if front > 0.35 and v_norm < 0.15:
-            reward -= 0.4                          # 앞 뚫렸는데 최저속이면 감점
-        if collided:
-            reward -= 30.0
-        if front < 0.12:
-            reward -= 0.6
-        if self.lap_completed:
-            reward += max(0.0, 200.0 - self.steps * self.DT)
+        # 최장 LiDAR 빔 방향 = 가야 할 쪽
+        half = self.FOV / 2.0
+        rels = np.linspace(-half, half, self.N_RAYS)
+        i_max = int(np.argmax(scans))
+        d_max = float(scans[i_max])
+        align = float(np.cos(rels[i_max]))  # 1이면 최장빔이 정면
 
-        terminated = collided or self.lap_completed
+        # ===== MAPLESS: 최장 LiDAR 쪽 이동 + 열리면 가속 / 막히면 감속 =====
+        reward = 10.0 * moved * max(align, 0.0) * (0.25 + 0.75 * d_max)
+        v_frac = self.v / self.MAX_SPEED
+        if d_max > 0.45 and align > 0.5:
+            reward += 3.0 * v_frac          # 앞 뚫리면 빠르게
+        else:
+            reward -= 4.0 * v_frac          # 막히면 고속 페널티 → 감속 학습
+        if d_max < 0.12:
+            reward -= 2.0
+        if collided:
+            reward -= 12.0
+
+        terminated = collided
         truncated = self.steps >= self.MAX_STEPS
         obs = self._get_obs()
         info = {
             "collided": collided,
-            "lap_completed": self.lap_completed,
-            "lap_time": self.steps * self.DT if self.lap_completed else None,
+            "lap_completed": False,
+            "lap_time": None,
             "track_name": self.map_name,
-            "progress": (
-                self._progress_acc / max(len(self.centerline), 1)
-                if self.centerline is not None else 0.0
-            ),
+            "progress": 0.0,
+            "dist_m": self._dist_acc,
             "pos": np.array([self.x, self.y], dtype=np.float32),
             "theta": self.theta,
             "steering_angle": self.last_steer,
             "speed": self.last_speed_cmd,
-            "reward_mode": "mapless_obs_lap_reward",
+            "reward_mode": "mapless_max_lidar",
         }
         return (obs, reward, terminated, truncated, info) if _HAS_GYM else (obs, reward, terminated or truncated, info)
 
@@ -391,17 +401,15 @@ class LidarRaceEnv(_EnvBase):
 if __name__ == "__main__":
     env = LidarRaceEnv("ajou", seed=0)
     obs, info = env.reset()
-    print(f"map={info['map']} start=({env.x:.2f},{env.y:.2f}) lidar={obs[:5]}")
-    for t in range(500):
-        rays = obs[: env.N_RAYS]
+    print(f"map={info['map']} start=({env.x:.2f},{env.y:.2f}) mode={info.get('reward_mode')}")
+    for t in range(800):
+        off = env.N_RAYS * (env.HIST_LEN - 1)
+        rays = obs[off: off + env.N_RAYS]
         left, mid, right = rays[:7].mean(), rays[7:13].mean(), rays[13:].mean()
         steer = float(np.clip((right - left) * 2.0, -1, 1))
-        speed_u = 0.4 if mid > 0.35 else 0.0
-        obs, r, term, trunc, info = env.step(np.array([steer, speed_u]))
-        if t == 0:
-            print(f"speed_cmd={info['speed']:.2f} (must be in [2,7])")
+        obs, r, term, trunc, info = env.step(np.array([steer, 0.0]))
         if term or trunc:
-            print(f"end t={t} crash={info['collided']} lap={info['lap_completed']}")
+            print(f"end t={t} crash={info['collided']} dist={info['dist_m']:.1f}m")
             break
     else:
-        print("ok 500 steps")
+        print(f"ok dist={info['dist_m']:.1f}m")

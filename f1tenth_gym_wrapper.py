@@ -5,11 +5,8 @@ f1tenth_gym_wrapper.py
 f1tenth_racetracks(실제 F1 트랙 20여 개, Silverstone/Spielberg/Austin 등)를
 MultiTrackEnv와 동일한 인터페이스로 감싼 래퍼.
 
-이 개발 환경은 인터넷이 없어 f1tenth_gym을 설치·실행해보지 못했다 —
-아래 코드는 공식 문서·커뮤니티 프로젝트(navidmdn/f1tenth_rl 등)에서 확인한
-API 패턴을 기준으로 작성했으며, 실제 설치 후 소소한 인자명 차이가 있을 수
-있다. multitrack_env.py에서 이미 검증한 로직(관측 구성, 여러 트랙 순환,
-리워드 계산)을 그대로 재사용하도록 설계했다.
+이 개발 환경의 공식 f110_gym(setup: gym==0.19, numpy<=1.22)은 Python 3.14와
+호환되지 않는다. 본선은 `f1tenth_mapless_env.py` (racetracks occupancy 폴백)을 사용.
 
 설치 (사용자 로컬 머신, GPU 노트북 등에서):
     git clone https://github.com/f1tenth/f1tenth_gym

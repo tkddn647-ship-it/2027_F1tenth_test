@@ -66,9 +66,11 @@ def render_frame(env: LidarRaceEnv, xs, ys, title: str) -> np.ndarray:
     return frame
 
 
-def wall_follow(obs, n_rays: int) -> np.ndarray:
-    """LiDAR만으로 조향·속도. action[1]=0→2 m/s, 1→7 m/s."""
-    rays = obs[:n_rays]
+def wall_follow(obs, n_rays: int, hist_len: int = 4) -> np.ndarray:
+    """최신 LiDAR 프레임(히스토리 마지막)으로 조향·속도."""
+    # obs = [lidar * hist_len | v | yaw]
+    off = n_rays * (hist_len - 1)
+    rays = obs[off: off + n_rays]
     left, mid, right = rays[:7].mean(), rays[7:13].mean(), rays[13:].mean()
     steer = float(np.clip((right - left) * 2.2, -1, 1))
     if mid < 0.22:
@@ -127,7 +129,7 @@ def main():
         if model is not None:
             action, _ = model.predict(obs, deterministic=True)
         else:
-            action = wall_follow(obs, env.N_RAYS)
+            action = wall_follow(obs, env.N_RAYS, env.HIST_LEN)
         obs, r, term, trunc, info = env.step(action)
         xs.append(env.x)
         ys.append(env.y)
@@ -137,7 +139,7 @@ def main():
             title = (
                 f"{args.map}  {st}  t={t_sec:.1f}s  "
                 f"v={env.v:.1f}m/s  steer={np.degrees(env.last_steer):.0f}deg  "
-                f"prog={info.get('progress', 0):.0%}"
+                f"dist={info.get('dist_m', 0):.1f}m"
             )
             frames.append(Image.fromarray(render_frame(env, xs, ys, title)))
         if term or trunc:
@@ -154,8 +156,8 @@ def main():
     t_end = (step + 1) * env.DT if frames else 0.0
     print(
         f"[watch] {args.map} t={t_end:.1f}s "
-        f"lap={info.get('lap_completed')} crash={info.get('collided')} "
-        f"prog={info.get('progress')} v_end={env.v:.1f} -> {gif.resolve()}"
+        f"crash={info.get('collided')} dist={info.get('dist_m', 0):.1f}m "
+        f"v_end={env.v:.1f} -> {gif.resolve()}"
     )
     try:
         import os
