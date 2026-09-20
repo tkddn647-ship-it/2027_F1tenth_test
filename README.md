@@ -57,10 +57,44 @@ python watch_sac_f1tenth.py --model connectome_sac_f1tenth_Spielberg.zip --map S
 | `frame_skip` | **4** → 제어 **~10 Hz** | 50→10 Hz로 행동 차이·히스토리 정보량 확보 |
 | 히스토리 5프레임 | span ≈ **0.4 s** | skip 간격으로 스택 (예전 0.08 s) |
 | 스폰 | CL **전체** + 헤딩/횡 노이즈 | 직선만 버퍼에 쌓이는 것 방지 |
-| 랩 | `truncate` + 보너스 20 (terminate 아님) | Q 절벽 완화 |
-| 학습 저장 | `runs/*/best`, `checkpoints` | 피크 모델 보존 |
+| 랩 | `truncate` + 보너스 30 (terminate 아님) | Q 절벽 완화 |
+| 보상 v4 | alive +0.2 / crash −10 / progress×4 | 짧은 충돌이 “best”로 잡히던 붕괴 방지 |
+| 학습 저장 | `runs/*/best`(길이 우선), `checkpoints` | EvalCallback length-aware |
 
 A/B: **먼저** `train_sac_plain.py` (Eval deterministic). plain도 무너지면 env/SAC, plain만 안정이면 커넥톰.
+
+---
+
+## 학습 결과 (Spielberg · 실차 정렬 A/B)
+
+실차 스펙 env (`40 m` LiDAR / `40 Hz` sim / 제어 `~10 Hz`)에서  
+**plain MLP SAC 150k** 완료 + **connectome SAC ~80k** 저장 후 deterministic watch.
+
+| 모델 | steps | 대표 seed0 랩 | 비고 |
+|------|------:|---------------|------|
+| plain MLP SAC | 150k | **101.7 s** 완주 | `plain_sac_f1tenth_Spielberg.zip` |
+| connectome SAC | ~80k | **98.4 s** 완주 | `connectome_sac_f1tenth_Spielberg_80k.zip` (best도 랩 가능) |
+
+<p align="center">
+  <img src="docs/figures/sac_ab_eval_curves.png" alt="SAC A/B eval curves" width="900"/>
+</p>
+
+Deterministic eval: 두 모델 모두 ~10k 이후 **랩 완주 구간**(ep_len ≈ 1000–1500 ≈ 100–150 s)에 진입.  
+connectome은 초반 상승이 더 가파름(10k에서 이미 랩). plain은 150k까지 안정적으로 유지.
+
+| | plain last (seed0) | connectome 80k (seed0) |
+|--|--------------------|------------------------|
+| GIF | ![](docs/figures/sac_plain_Spielberg.gif) | ![](docs/figures/sac_connectome_Spielberg.gif) |
+| traj | ![](docs/figures/sac_plain_Spielberg_traj.png) | ![](docs/figures/sac_connectome_Spielberg_traj.png) |
+
+```powershell
+# 결과 재현 (GIF + traj PNG)
+python watch_sac_f1tenth.py --model plain_sac_f1tenth_Spielberg.zip --map Spielberg --plain --seed 0
+python watch_sac_f1tenth.py --model connectome_sac_f1tenth_Spielberg_80k.zip --map Spielberg --use-cache --seed 0
+python plot_sac_results.py   # → docs/figures/sac_ab_eval_curves.png
+```
+
+체크포인트: `runs/plain_Spielberg/`, `runs/connectome_Spielberg/` (gitignore). zip은 로컬 보관.
 
 ---
 
@@ -198,18 +232,18 @@ Jetson에서는 env step이 짧고 배치 추론이 잦을수록 GPU 비율이 �
      675              5
 ```
 
-### 보상 (privileged)
+### 보상 (privileged · v4)
 
 \[
 \begin{aligned}
-r &= 0.25 + 8\max(\Delta s,0) + \max(\cos\phi,0)
-    + 0.5\,v_{\mathrm{norm}}\max(\cos\phi,0)
-    - 0.4\max(\mathrm{CTE}-0.4,0)\\
+r &= 4\max(\Delta s,0) + 0.2 + 0.15\max(\cos\phi,0)
+    + 0.25\,v_{\mathrm{norm}}\max(\cos\phi,0)\\
+    &\quad - 0.1\max(\mathrm{CTE}-0.7,0) - 0.4\max(-\Delta s,0)\\
 r &\leftarrow \mathrm{clip}(r,-2,10)
 \end{aligned}
 \]
 
-충돌 \(-5\), 랩 \(+100\).  
+충돌 \(-10\), 랩 \(+30\) (truncate). alive 항으로 **긴 주행 > 짧은 충돌**.  
 **실차 추론에는 센터라인 불필요** (관측 mapless).
 
 ### 제어 · 동역학
@@ -219,7 +253,8 @@ r &\leftarrow \mathrm{clip}(r,-2,10)
 v^{\mathrm{cmd}}=v_{\min}+a_1(v_{\max}-v_{\min})
 \]
 
-기본 커리큘럼 \(v\in[2,3.5]\), \(\delta_{\max}=0.30\), \(\Delta t=0.02\), \(L=0.33\).
+기본 커리큘럼 \(v\in[2,3.5]\), \(\delta_{\max}=0.30\), 물리 \(\Delta t=0.025\) (40 Hz),  
+제어 `frame_skip=4` → \(\Delta t_{\mathrm{ctrl}}=0.1\) (~10 Hz), \(L=0.33\).
 
 ---
 
@@ -257,18 +292,20 @@ a ~ Actor(feat)                                 # SAC
 | `batch_size` | CUDA 512 / CPU 256 |
 | `train_freq` / `grad_steps` | 4 / 4 |
 | `learning_starts` | 3000 |
-| `target_entropy` | -1.0 |
+| `target_entropy` | **-2.0** (행동 dim=2) |
 
 ```powershell
-python train_sac_connectome.py --use-cache --map Spielberg --timesteps 200000 --fresh `
+python train_sac_connectome.py --use-cache --map Spielberg --timesteps 150000 --fresh `
   --device auto --max-neurons 256 --min-speed 2 --max-speed 3.5 --max-steer 0.30
 
-python train_sac_plain.py --map Spielberg --timesteps 120000 --fresh
+python train_sac_plain.py --map Spielberg --timesteps 150000 --fresh `
+  --min-speed 2 --max-speed 3.5 --max-steer 0.30
 ```
 
 | 로그 | 의미 |
 |------|------|
-| `ep_len_mean` | 생존 (×0.02≈초) **1순위** |
+| `ep_len_mean` | 생존 (×0.1≈초 @10 Hz) **1순위** |
+| `eval/mean_ep_length` | deterministic 길이 (best 저장 기준) |
 | `ep_rew_mean` | 보상 합 (식 바꾸면 비교 금지) |
 | `fps` | CPU env 병목 시 낮을 수 있음 |
 | `[lap]` | 완주 |
@@ -286,7 +323,9 @@ python train_sac_plain.py --map Spielberg --timesteps 120000 --fresh
 | `connectome_loader.py` | hemibrain 서브서킷 |
 | `train_sac_connectome.py` | SAC (`--device`) |
 | `train_sac_plain.py` | MLP ablation |
-| `watch_sac_f1tenth.py` | GIF |
+| `watch_sac_f1tenth.py` | GIF + traj PNG |
+| `plot_sac_results.py` | plain/connectome eval 곡선 |
+| `train_callbacks.py` | length-aware Eval + ckpt |
 | `roboracer_connectome_node.py` | Jetson `/drive` 스케치 |
 
 ---

@@ -236,8 +236,8 @@ class F1TenthMaplessEnv(_EnvBase):
             base = self._start_pool[int(self.rng.integers(0, len(self._start_pool)))].copy()
             x, y, th = float(base[0]), float(base[1]), float(base[2])
             # 헤딩·횡방향 노이즈 → 코너/오프셋 데이터
-            th = th + float(self.rng.uniform(-0.35, 0.35))
-            lat = float(self.rng.uniform(-0.35, 0.35))
+            th = th + float(self.rng.uniform(-0.12, 0.12))
+            lat = float(self.rng.uniform(-0.15, 0.15))
             nx, ny = np.cos(th - np.pi / 2), np.sin(th - np.pi / 2)
             x2, y2 = x + lat * nx, y + lat * ny
             if not self.is_occupied(x2, y2, 0.2):
@@ -402,19 +402,20 @@ class F1TenthMaplessEnv(_EnvBase):
         obs = self._get_obs()
         v_norm = (self.v - self.MIN_SPEED) / max(self._speed_span, 1e-6)
 
-        # 진행 위주 / alive·heading 공짜 최소화
+        # 생존+진행이 짧은 충돌보다 항상 유리 (음수 누적 붕괴 방지)
         reward = (
-            3.0 * max(sum_ds, 0.0)
-            + 0.3 * max(last_hcos, 0.0)
-            + 0.4 * v_norm * max(last_hcos, 0.0)
-            - 0.5 * max(last_cte - 0.4, 0.0)
-            - 1.0 * max(-sum_ds, 0.0)
+            4.0 * max(sum_ds, 0.0)
+            + 0.2  # alive
+            + 0.15 * max(last_hcos, 0.0)
+            + 0.25 * v_norm * max(last_hcos, 0.0)
+            - 0.1 * max(last_cte - 0.7, 0.0)
+            - 0.4 * max(-sum_ds, 0.0)
         )
-        reward = float(np.clip(reward, -3.0, 8.0))
+        reward = float(np.clip(reward, -2.0, 10.0))
         if collided:
-            reward = -5.0
+            reward = -10.0
         if self.lap_completed:
-            reward += 20.0  # 작은 보너스; 가치 절벽 완화
+            reward += 30.0
 
         # 충돌만 terminate. 랩은 truncate (bootstrap 유지)
         terminated = collided
@@ -430,7 +431,7 @@ class F1TenthMaplessEnv(_EnvBase):
             "pos": np.array([self.x, self.y], dtype=np.float32),
             "theta": self.theta,
             "track_name": self.map_name,
-            "reward_mode": "privileged_progress_v2",
+            "reward_mode": "privileged_progress_v4",
             "ctrl_hz": 1.0 / self.dt_ctrl,
         }
         return (obs, reward, terminated, truncated, info) if _HAS_GYM else (

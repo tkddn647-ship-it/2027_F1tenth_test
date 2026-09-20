@@ -2,6 +2,7 @@
 watch_sac_f1tenth.py
 ====================
   python watch_sac_f1tenth.py --model connectome_sac_f1tenth_Spielberg.zip --map Spielberg --use-cache
+  python watch_sac_f1tenth.py --model plain_sac_f1tenth_Spielberg_best.zip --map Spielberg --plain
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from connectome_loader import (
     load_hemibrain_cache,
     select_speed_relevant_subcircuit,
 )
-from f1tenth_mapless_env import F1TenthMaplessEnv, N_BEAMS, HIST_LEN
+from f1tenth_mapless_env import F1TenthMaplessEnv, N_BEAMS
 from policy_sac_connectome import ConnectomeTemporalFeatures
 
 
@@ -72,20 +73,31 @@ def main():
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--map", type=str, default="Spielberg")
     parser.add_argument("--use-cache", action="store_true")
+    parser.add_argument("--plain", action="store_true", help="MLP SAC (no connectome)")
     parser.add_argument("--cache-dir", type=str, default="hemibrain_cache")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--max-sec", type=float, default=60.0)
+    parser.add_argument("--max-sec", type=float, default=180.0)
+    parser.add_argument("--min-speed", type=float, default=2.0)
+    parser.add_argument("--max-speed", type=float, default=3.5)
+    parser.add_argument("--max-steer", type=float, default=0.30)
+    parser.add_argument("--tag", type=str, default=None)
     parser.add_argument("--out-dir", type=str, default="watch_out_race")
     args = parser.parse_args()
 
-    env = F1TenthMaplessEnv(args.map, seed=args.seed)
+    env = F1TenthMaplessEnv(
+        args.map,
+        seed=args.seed,
+        min_speed=args.min_speed,
+        max_speed=args.max_speed,
+        max_steer=args.max_steer,
+    )
     custom = None
-    if args.use_cache:
+    if args.use_cache and not args.plain:
         n, c = load_hemibrain_cache(args.cache_dir)
-        n, c = select_speed_relevant_subcircuit(n, c)
+        n, c = select_speed_relevant_subcircuit(n, c, max_neurons=256)
         n = n.reset_index(drop=True)
         i, o = identify_io_neurons(n)
-        A = build_adjacency(n, c)
+        _ = build_adjacency(n, c)  # topology sanity; weights live in zip
         custom = {"ConnectomeTemporalFeatures": ConnectomeTemporalFeatures}
 
     model = SAC.load(args.model, env=env, custom_objects=custom, device="cpu")
@@ -93,7 +105,7 @@ def main():
     xs, ys = [env.x], [env.y]
     frames = []
     info = {}
-    dt = 0.02
+    dt = float(getattr(env, "dt_ctrl", 0.1))
     max_steps = min(env.MAX_STEPS, int(args.max_sec / dt))
 
     for step in range(max_steps):
@@ -101,7 +113,7 @@ def main():
         obs, r, term, trunc, info = env.step(action)
         xs.append(env.x)
         ys.append(env.y)
-        if step % 3 == 0 or term or trunc:
+        if step % 2 == 0 or term or trunc:
             st = "LAP" if info.get("lap_completed") else ("CRASH" if info.get("collided") else "RUN")
             t_sec = (step + 1) * dt
             title = (
@@ -114,20 +126,43 @@ def main():
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    gif = out / f"sac_{args.map}_model.gif"
-    if len(frames) > 400:
-        frames = frames[:: max(1, len(frames) // 400)]
+    tag = args.tag or ("connectome" if args.use_cache and not args.plain else "plain")
+    gif = out / f"sac_{tag}_{args.map}.gif"
+    if len(frames) > 350:
+        frames = frames[:: max(1, len(frames) // 350)]
     if frames:
-        frames[0].save(gif, save_all=True, append_images=frames[1:], duration=60, loop=0)
+        frames[0].save(gif, save_all=True, append_images=frames[1:], duration=50, loop=0)
+        # still trajectory PNG
+        png = out / f"sac_{tag}_{args.map}_traj.png"
+        fig, ax = plt.subplots(figsize=(8, 6), dpi=120)
+        ox, oy = float(env.origin[0]), float(env.origin[1])
+        ax.imshow(
+            env.occ, cmap="gray_r", origin="upper",
+            extent=[ox, ox + env.w * env.resolution, oy, oy + env.h * env.resolution],
+        )
+        if env.centerline is not None:
+            ax.plot(env.centerline[:, 0], env.centerline[:, 1], color="#888", lw=5, alpha=0.3)
+        ax.plot(xs, ys, color="#e22", lw=2)
+        ax.scatter(xs[0], ys[0], c="#0a5", s=60, zorder=5, label="start")
+        ax.scatter(xs[-1], ys[-1], c="#f80", s=60, zorder=5, label="end")
+        ax.set_aspect("equal")
+        ax.set_title(
+            f"{tag} | lap={info.get('lap_completed')} "
+            f"prog={info.get('progress', 0):.1%} "
+            f"t={(step+1)*dt:.1f}s"
+        )
+        ax.legend(loc="upper right")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        fig.tight_layout()
+        fig.savefig(png)
+        plt.close(fig)
+        print(f"[watch] traj -> {png.resolve()}")
+
     print(
         f"[watch] t={(step+1)*dt:.1f}s lap={info.get('lap_completed')} "
         f"crash={info.get('collided')} prog={info.get('progress')} -> {gif.resolve()}"
     )
-    try:
-        import os
-        os.startfile(str(gif.resolve()))
-    except Exception:
-        pass
 
 
 if __name__ == "__main__":

@@ -65,6 +65,7 @@ def main():
         train_freq=1,
         gradient_steps=1,
         ent_coef="auto",
+        target_entropy=-2.0,  # 탐험 과다로 짧은 에피소드 방지
         verbose=1,
         seed=args.seed,
         device=device,

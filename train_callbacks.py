@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 from stable_baselines3.common.callbacks import (
     BaseCallback,
     CallbackList,
@@ -11,7 +12,6 @@ from stable_baselines3.common.callbacks import (
     EvalCallback,
 )
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.monitor import Monitor
 
 
 class ProgressLogger(BaseCallback):
@@ -31,7 +31,7 @@ class ProgressLogger(BaseCallback):
 
 
 class TrainStatsLogger(BaseCallback):
-    """Print ent_coef / losses periodically (원인 4·2 진단용)."""
+    """Print ent_coef / losses periodically."""
 
     def __init__(self, every: int = 2000):
         super().__init__()
@@ -40,8 +40,6 @@ class TrainStatsLogger(BaseCallback):
     def _on_step(self) -> bool:
         if self.n_calls % self.every != 0:
             return True
-        logger = self.model.logger
-        # SB3 dumps to logger; also peek model attrs
         ent = getattr(self.model, "ent_coef", None)
         if callable(ent):
             try:
@@ -54,10 +52,54 @@ class TrainStatsLogger(BaseCallback):
             except Exception:
                 ent = ent
         print(
-            f"[stats] steps={self.num_timesteps} ent_coef≈{ent} "
+            f"[stats] steps={self.num_timesteps} ent_coef~{ent} "
             f"(see rollout/train tables for critic/actor loss)"
         )
         return True
+
+
+class LengthAwareEvalCallback(EvalCallback):
+    """Save best by mean episode length (tie-break: mean reward).
+
+    Pure reward ranking collapses when longer rollouts accumulate more
+    negative CTE terms than short crashes.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.best_mean_length = -np.inf
+
+    def _on_step(self) -> bool:
+        if self.eval_freq <= 0 or self.n_calls % self.eval_freq != 0:
+            return True
+
+        prev_path = self.best_model_save_path
+        prev_best_r = self.best_mean_reward
+        self.best_model_save_path = None
+        continue_training = super()._on_step()
+        self.best_model_save_path = prev_path
+        self.best_mean_reward = prev_best_r
+
+        if len(self.evaluations_length) == 0:
+            return continue_training
+
+        mean_reward = float(self.last_mean_reward)
+        mean_length = float(np.mean(self.evaluations_length[-1]))
+        improved = mean_length > self.best_mean_length + 1e-6 or (
+            abs(mean_length - self.best_mean_length) < 1e-6
+            and mean_reward > self.best_mean_reward
+        )
+        if improved:
+            self.best_mean_length = mean_length
+            self.best_mean_reward = mean_reward
+            if self.verbose > 0:
+                print(
+                    f"New best mean ep_length={mean_length:.1f} "
+                    f"(reward={mean_reward:.2f})!"
+                )
+            if self.best_model_save_path is not None:
+                self.model.save(str(Path(self.best_model_save_path) / "best_model"))
+        return continue_training
 
 
 def make_train_callbacks(
@@ -77,7 +119,7 @@ def make_train_callbacks(
     ckpt_dir.mkdir(exist_ok=True)
 
     eval_env = make_vec_env(env_fn, n_envs=1, seed=seed + 1000)
-    eval_cb = EvalCallback(
+    eval_cb = LengthAwareEvalCallback(
         eval_env,
         best_model_save_path=str(best_dir),
         log_path=str(log_dir / "eval"),

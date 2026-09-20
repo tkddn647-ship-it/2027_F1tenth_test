@@ -192,7 +192,7 @@ def main():
             train_freq=4,
             gradient_steps=4,
             ent_coef="auto",
-            # default target_entropy = -|A| = -2 (노이즈 과다 방지)
+            target_entropy=-2.0,
             verbose=1,
             seed=args.seed,
             device=device,
