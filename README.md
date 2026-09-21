@@ -1,28 +1,35 @@
 # robo_testr
 
 초파리 **hemibrain 커넥톰**을 **시간축 temporal memory**로 학습하는  
-**SAC** 기반 F1TENTH **mapless** 레이싱 레포.  
+**SAC** 기반 F1TENTH **mapless 관측** 레이싱 레포.  
 학습·추론은 **GPU(CUDA / Jetson)** 우선, CPU는 폴백.
+
+> **Mapless란?** 정책 입력에는 **맵·센터라인·(x,y)가 없다**.  
+> 관측 = LiDAR hist + yaw만. 센터라인은 **학습 보상/랩 채점용 privileged 신호**일 뿐이며  
+> 실차 추론(` /scan` → 정책 → `/drive`)에는 불필요하다.
 
 | 구분 | 본선 | Ablation / 레거시 |
 |------|------|-------------------|
-| 알고리즘 | **SAC** + ConnectomeRNN (학습) | plain MLP SAC / PPO |
+| 알고리즘 | **SAC** + ConnectomeRNN | plain MLP SAC / PPO |
 | Env | `f1tenth_mapless_env.py` | `lidar_race_env.py` (ajou PPO) |
-| 관측 | LiDAR 135×5 + yaw×5 → **680** | dim 82 (레거시) |
-| LiDAR 시뮬 | **40 m / 40 Hz** (실차), 제어 frame_skip=4 → **~10 Hz** | — |
-| 보상 | privileged CL progress (관측은 mapless) | mapless LiDAR+odom |
-| 디바이스 | `--device auto\|cuda` (Jetson GPU) | CPU 가능 |
-| 체크포인트 | `EvalCallback`(deterministic) + `best_model` + periodic ckpt | — |
+| 관측 | LiDAR 135×5 + yaw×5 → **680** (**mapless**) | dim 82 (레거시) |
+| 보상 | privileged CL progress (**관측과 분리**) | — |
+| 물리 | **Single-Track** (슬립/μ, Roboracer 제원) | kinematic (1단계 데모) |
+| LiDAR 시뮬 | **40 m / 40 Hz**, 제어 ~**10 Hz** | — |
+| 속도 | 기본 **`[2, 7]` m/s** | kinematic 데모 `[2, 3.5]` |
+| 디바이스 | `--device auto\|cuda` | CPU 가능 |
 
 ```bash
-# GPU 있으면 자동 cuda (Jetson / PC)
-python train_sac_connectome.py --use-cache --map Spielberg --timesteps 200000 --fresh \
-  --device cuda --max-neurons 256 --batch-size 512
+# Physical AI plain (Roboracer ST, v∈[2,7])
+python train_sac_plain.py --map Spielberg --timesteps 200000 --fresh `
+  --min-speed 2 --max-speed 7 --max-steer 0.3735 --physics st --device auto
 
-python watch_sac_f1tenth.py --model connectome_sac_f1tenth_Spielberg.zip --map Spielberg --use-cache
+# Connectome (같은 env 기본값)
+python train_sac_connectome.py --use-cache --map Spielberg --timesteps 200000 --fresh `
+  --device cuda --max-neurons 256 --min-speed 2 --max-speed 7 --max-steer 0.3735 --physics st
 ```
 
-실차: `Roboracer-2026-main/` (Jetson ROS2).
+실차 스택·제원: `Roboracer-2026-main/` (Jetson ROS2, `vehicle_geometry.py` 등).
 
 ---
 
@@ -41,11 +48,12 @@ python watch_sac_f1tenth.py --model connectome_sac_f1tenth_Spielberg.zip --map S
 
 | 질문 | 답 |
 |------|----|
-| 무엇을 풀나? | mapless LiDAR로 F1TENTH 트랙 주행 |
-| 왜 SAC? | 연속 행동 + off-policy (GPU 배치 학습과 잘 맞음) |
-| 커넥톰? | LSTM 역할의 **고정 배선 RNN 메모리** (scale/\(W_{in}\) 학습) |
-| 인코더? | 원시 센서를 짧은 벡터로 압축 (아래 개념 절) |
-| Jetson? | `device=cuda`, dense matmul, 배치 인코딩으로 **GPU 비중↑** |
+| 무엇을 풀나? | **맵 없이** LiDAR(+yaw)만으로 F1TENTH 트랙 주행 |
+| 센터라인? | **관측 ❌ / 보상·랩 채점 ✅** (privileged). 실차 불필요 |
+| 왜 SAC? | 연속 행동 + off-policy |
+| 커넥톰? | LSTM 자리의 **고정 배선 RNN 메모리** |
+| Physical AI? | ST 슬립/μ + Roboracer 조향·\(a_{lat}\)·가속 제원 |
+| Jetson? | `device=cuda`, dense matmul, 배치 인코딩 |
 
 ### 타이밍 (실차 정렬 · 학습 안정)
 
@@ -56,10 +64,10 @@ python watch_sac_f1tenth.py --model connectome_sac_f1tenth_Spielberg.zip --map S
 | 레이 샘플 | 맵 `resolution`(~5 cm) | 얇은 벽 관통 방지 |
 | `frame_skip` | **4** → 제어 **~10 Hz** | 50→10 Hz로 행동 차이·히스토리 정보량 확보 |
 | 히스토리 5프레임 | span ≈ **0.4 s** | skip 간격으로 스택 (예전 0.08 s) |
-| 스폰 | CL **전체** + 헤딩/횡 노이즈 | 직선만 버퍼에 쌓이는 것 방지 |
-| 랩 | `truncate` + 보너스 30 (terminate 아님) | Q 절벽 완화 |
-| 보상 v4 | alive +0.2 / crash −10 / progress×4 | 짧은 충돌이 “best”로 잡히던 붕괴 방지 |
-| 학습 저장 | `runs/*/best`(길이 우선), `checkpoints` | EvalCallback length-aware |
+| 스폰 | CL 접선 헤딩 정렬 + 소량 횡노이즈 | 역헤딩 스폰·가짜 reverse 방지 |
+| 랩 | `truncate` + 보너스 30 | Q 절벽 완화 |
+| 보상 | ST progress + 슬립/\(a_y\)/조향급변 | Physical AI |
+| 학습 저장 | `runs/*/best`(길이 우선), ckpt | EvalCallback length-aware |
 
 A/B: **먼저** `train_sac_plain.py` (Eval deterministic). plain도 무너지면 env/SAC, plain만 안정이면 커넥톰.
 
@@ -96,46 +104,80 @@ python plot_sac_results.py   # → docs/figures/sac_ab_eval_curves.png
 
 체크포인트: `runs/plain_Spielberg/`, `runs/connectome_Spielberg/` (gitignore). zip은 로컬 보관.
 
-### 왜 7 m/s까지 안 올라가냐?
+---
 
-속도는 정책이 “마음대로” 올리는 게 아니라 **환경 상한**에 클립됩니다.
+## Physical AI · Roboracer 제원 · 슬립
+
+### Mapless 관측 vs privileged 센터라인 (헷갈리면 여기)
+
+| | 정책(관측) | 시뮬 내부 |
+|--|------------|-----------|
+| LiDAR 135×5 + yaw×5 | ✅ | ✅ |
+| 맵 occupancy | ❌ | 레이캐스트·충돌용 |
+| **센터라인** | ❌ | 진행 \(\Delta s\), 랩, 스폰 정렬, CTE |
+| 슬립각 β, \(a_y\) | ❌ (직접 안 줌) | 동역학 상태 + **보상 패널티** |
+
+실차: `/scan`(+yaw)만 있으면 된다. CL CSV는 **학습 서버에서만** 쓴다.
+
+### Roboracer-2026-main 에서 가져온 제원
+
+| 항목 | 값 | 출처 |
+|------|-----|------|
+| 휠베이스 \(L\) | **0.33 m** | `vehicle_geometry.WHEELBASE_M` |
+| 차체 반폭 | **0.15 m** (충돌 inflate) | `HALF_WIDTH_M` |
+| 실측 전륜각 | **±0.3735 rad (±21.4°)** | `max_steering_angle_real_rad` |
+| 횡가속 한계 \(a_{lat}\) | **6.0 m/s²** | `speed_profile.VEHICLE` |
+| 가속 한계 | **7.0 m/s²** | 동상 `a_accel` |
+| 감속(참고) | 4.0 m/s² | 제원에만; ST에 비대칭 브레이크는 아직 약함 |
+| 학습 속도 밴드 | **`[2.0, 7.0]` m/s** | 커리큘럼 |
+
+구현: `vehicle_dynamics.STParams.roboracer()` → \(\mu \approx a_{lat}/g \approx 0.61\),  
+\(C_{Sf},C_{Sr}\)는 f1tenth_gym 식별값 유지.
+
+### 동역학에서 **고려하는** 것 (ST)
+
+- 타이어 **슬립각 β**, 요레이트, 횡가속 \(a_y \approx v\dot\psi\)
+- 노면 마찰 **μ**, 코너링 강성, CG 높이(하중 이동 근사)
+- 조향각·조향각속도 한계, 종가속 한계·고속 가속 감쇠
+- \(v<0.5\)면 kinematic bicycle으로 전환
+- RK4 + 5 ms 서브스텝, 명령은 PID → `(accl, steer_vel)`
+- 보상: 진행 + **슬립/ \(a_y\) 초과 / 조향급변 / CTE** 패널티
+
+### 아직 **약한/없는** 것
+
+개별 휠·서스펜션, 종방향 슬립(록), 브레이크≠가속 비대칭, 서보 지연,  
+μ 맵, 모터/VESC 전류, 차체 스윕 충돌(현재 점+반폭). → Isaac Sim 후속 후보.
+
+### 속도 커리큘럼 · 현재 학습
 
 ```text
 v_cmd = min_speed + action_speed * (max_speed - min_speed)
 ```
 
-| 단계 | 물리 | 속도 밴드 | 상태 |
-|------|------|-----------|------|
-| **1 (현재 데모 zip)** | kinematic | `[2, 3.5]` | `*_80k` / `*_v35` — 랩·GIF·레이어 viz |
-| **2 (진행 중)** | **Single-Track** (슬립/μ) | `[0.5, 7.0]` | plain ST 재학습 → 이후 connectome |
-
-지금까지 1단계는 kinematic + `--max-speed 3.5`로 랩을 확보했습니다.  
-**현재 코드 기본은 Single-Track 동역학(타이어 슬립/μ, f1tenth_gym 계열) + 최고속도 7.0 m/s**입니다.  
-`min_speed`는 코너 감속을 위해 **0.5**로 내렸습니다.
-
-천장만 7로 연다고 바로 7 m/s가 나오지는 않습니다.
-
-1. **액션 스케일:** `speed_u=1`이어도 env `max_speed`가 3.5면 **물리적으로 3.5가 끝**.  
-2. **보상:** ST 모드(`privileged_progress_st_v1`)는 진행 \(\Delta s\) 위주 + 조향 급변·슬립각·횡가속 초과·CTE 패널티.  
-   고속에서 미끄러지면 패널티 → 정책이 풀스로틀을 늦게 배움.  
-3. **역주행 terminate:** 헤딩이 CL과 크게 어긋나면 즉시 종료 → 초반 `ep_len`이 짧을 수 있음.  
-4. **커리큘럼:** 3.5에서 안정 랩 → zip 백업 → `[0.5,7]` ST로 fresh/이어학습이 안전.
+| 단계 | 물리 | 속도 | 상태 |
+|------|------|------|------|
+| 1 | kinematic | `[2, 3.5]` | 데모 zip (`*_80k`, `*_v35.bak`) — 안정 랩 |
+| **2 (현재)** | **ST + Roboracer 제원** | **`[2, 7]`** | plain `…_st27` / `runs/plain_Spielberg/` |
 
 ```powershell
-python train_sac_plain.py --map Spielberg --timesteps 150000 --fresh `
-  --min-speed 0.5 --max-speed 7.0 --max-steer 0.30
-
-# kinematic 전용 zip은 *_v35.bak.zip 등으로 남겨 두세요.
+python train_sac_plain.py --map Spielberg --timesteps 200000 --fresh `
+  --min-speed 2 --max-speed 7 --max-steer 0.3735 --physics st `
+  --save-path plain_sac_f1tenth_Spielberg_st27.zip
 ```
 
-### 제로샷 전이 · 실차 맵 `ajou`
+스폰은 CL **접선 방향으로 헤딩 정렬**. 역주행 terminate는 **유예+연속 프레임**으로  
+가짜 reverse 학살을 줄였다.
 
-`--map ajou` → `Roboracer-2026-main/maps/cartographer_map_20260817_003202`.  
-Spielberg 학습 zip을 **재학습 없이** ajou에 올리면 (seed 0–5) plain/connectome 모두 **랩 완주·무충돌** (랩 ~15–23 s, 코스가 짧음).
+### 전이 맵 (본인 Cartographer / IFAC)
+
+| 맵 | alias | kinematic 3.5 zero-shot | ST 7 zero-shot |
+|----|-------|-------------------------|----------------|
+| ajou | `ajou` | 예전에 랩 가능 | 재평가/파인튜닝 권장 |
+| IFAC | `ifac` | zero-shot 실패(벽) | 파인튜닝 필요 |
 
 ```powershell
-python watch_sac_f1tenth.py --model plain_sac_f1tenth_Spielberg.zip --map ajou --plain --seed 0
-python watch_sac_f1tenth.py --model connectome_sac_f1tenth_Spielberg_80k.zip --map ajou --use-cache --seed 0
+python watch_sac_f1tenth.py --model connectome_sac_f1tenth_Spielberg_80k.zip `
+  --map ajou --use-cache --seed 0 --min-speed 2 --max-speed 3.5
 ```
 
 ---
@@ -228,86 +270,76 @@ SAC 목표 (최대 엔트로피):
 J(\pi)=\mathbb{E}\Big[\sum_t \gamma^t\big(r_t+\alpha\mathcal{H}(\pi(\cdot|s_t))\big)\Big]
 \]
 
-### 2.6 레이어·커넥톰 활성화 시각화 (무엇을 보나)
+### 2.6 레이어 활성화 시각화
 
-정책이 “핸들만 돌리는지”, 아니면 **인코더 → 커넥톰 메모리 → fuse**가 실제로 장면에 반응하는지  
-확인하려면 중간 활성화를 찍어 보는 것이 가장 직관적입니다.
+중간 활성화를 찍어 **정책이 장면에 반응하는지** 본다.  
+모델 종류에 따라 패널이 다르다.
 
-| 산출물 | 설명 |
+#### A) Connectome (kinematic 데모 zip)
+
+| 산출물 | 파일 |
 |--------|------|
-| 정적 스냅샷 | `docs/figures/policy_layers_activation.png` — 한 제어 스텝의 forward |
-| **연속 GIF** | `docs/figures/policy_layers_activation.gif` — 주행 중 패널이 시간에 따라 변하는 모습 |
+| PNG | `docs/figures/policy_layers_activation.png` |
+| GIF (길게) | `docs/figures/policy_layers_activation.gif` |
 
 <p align="center">
-  <img src="docs/figures/policy_layers_activation.png" alt="한 스텝 레이어 활성화" width="900"/>
+  <img src="docs/figures/policy_layers_activation.png" alt="connectome 한 스텝" width="900"/>
 </p>
 
 <p align="center">
-  <img src="docs/figures/policy_layers_activation.gif" alt="연속 레이어·커넥톰 활성화" width="900"/>
+  <img src="docs/figures/policy_layers_activation.gif" alt="connectome 연속 활성화" width="900"/>
 </p>
-
-사용 모델(예시): kinematic 학습된 `connectome_sac_f1tenth_Spielberg_80k.zip`,  
-속도 밴드 \(v\in[2, 3.5]\) (아래 “7 m/s” 절 참고). GIF는 센터라인에 정렬된 출발점에서  
-수백 제어 스텝을 돌며 매 stride마다 패널을 렌더합니다.
-
-#### 데이터 흐름 (한 제어 스텝 = GIF 한 프레임의 내부)
 
 ```text
-Obs 680
-  ├─ LiDAR 135 × 5  ──► LidarEnc (Conv1d) ──► z_L (48)
-  └─ yaw × 5        ──► IMUEnc (MLP)       ──► z_I (16)
-                              │
-                         z_t = [z_L; z_I] ∈ R^64
-                              │
-              t = 0..4  ConnectomeRNN unroll (고정 A_signed, 학습 scale/W_in)
-                              │
-                    h_t (뉴런 상태) ,  y_DN (출구 요약)
-                              │
-              skip(mean_t z)  ‖  y_DN  ──► Fuse(256) ──► SAC Actor → (steer, speed)
+Obs 680 → LidarEnc/IMUEnc → z_t
+       → ConnectomeRNN unroll (A_signed 고정, scale/W_in 학습)
+       → h_t, y_DN ‖ skip(z) → Fuse → Actor (steer, speed)
 ```
 
-`policy_sac_connectome.py`의 `forward_intermediates()`가 위 중간 텐서를 이름으로 반환하고,  
-`viz_policy_layers*.py`가 그걸 그립니다.
+| 패널 | 의미 |
+|------|------|
+| Track / LiDAR / hist | 장면 (맵은 **표시용**; 관측은 LiDAR만) |
+| Encoder \(z_t\) | 장면 압축이 시간에 따라 바뀌는지 |
+| \(\|h\|\) + DN | 커넥톰 메모리·출구 활성 |
+| \(h\) top40 / fuse | SAC에 들어가는 요약 |
 
-#### GIF / PNG 패널 읽는 법
+**뜻함:** LiDAR→\(z\)→\(h\)가 장면과 같이 변하면 커넥톰 경로가 쓰이는 **정성 증거**.  
+**뜻하지 않음:** top-k 뉴런 = 해부학 라벨이 아님.
 
-| 패널 | 보는 것 | 해석 포인트 |
-|------|---------|-------------|
-| **Track** | 맵 위 차·궤적 | “지금 직선인지 코너인지”의 시간축 기준 |
-| **LiDAR (m)** | 최신 스캔 (각도→거리) | 전방이 열리면 중앙 peak↑, 코너·벽 접근 시 한쪽이 깎임 |
-| **LiDAR hist** | 5프레임 거리 히트맵 | 장면이 시간으로 밀려오는 패턴; 직진이면 세로로 안정, 진입 시 기울어짐 |
-| **Encoder \(z_t\)** | \(t=0..4\) 잠재벡터 | LiDAR+yaw 압축. **줄무늬/색이 바뀌면 장면 표현이 바뀐 것** |
-| **Connectome \(\|h\|\) + DN** | 언롤 중 \(\|h_t\|\)와 DN 활성 | 커넥톰 **메모리 세기**. 코너·급변 구간에서 \(\|h\|\)·DN이 출렁이면 시간 통합이 살아 있는 증거 |
-| **\(h\) top40 / fuse** | \(\|h\|\) 큰 뉴런 + \(\|\mathrm{fuse}\|\) | SAC에 들어가는 요약. fuse 노름이 장면과 같이 변하면 “중간 feature가 행동을 받치는” 상태 |
+#### B) Plain ST Physical AI (현재 학습 체크포인트)
 
-제목줄 텔레메트리: `steer`, `speed_u`(정규화 속도 명령), 실제 `v`, `slip`, `prog`.
+커넥톰이 없는 MLP라 **Actor h1/h2 ReLU** + **slip / \(a_y\) / \(v\)** 를 본다.
 
-#### 이 그림이 “뜻하는” 것 / 뜻하지 않는 것
+| 산출물 | 파일 |
+|--------|------|
+| GIF | `docs/figures/policy_layers_activation_st_plain.gif` |
 
-- **뜻함:** 커넥톰은 조향 각도를 직접 뱉는 모듈이 아니라, **짧은 시간 맥락을 \(h\)에 담아 fuse로 넘기는 LSTM 자리**다.  
-  LiDAR가 기울고 → \(z\)가 바뀌고 → \(\|h\|\)/DN이 변하면, 그 경로가 실제로 쓰이고 있다는 **정성 증거**다.
-- **뜻하지 않음:** 특정 뉴런 = “왼쪽 벽” 같은 단일 개념 라벨은 아직 없다. top40은 **활성 크기 순위**일 뿐 해부학 이름 매핑이 아니다.
-- plain MLP ablation에는 Connectome 패널이 없다 (obs→MLP→행동). A/B는 eval 곡선·랩타임으로 비교하고, 이 GIF는 **connectome 경로 해석용**이다.
+<p align="center">
+  <img src="docs/figures/policy_layers_activation_st_plain.gif" alt="ST plain 레이어·슬립 활성화" width="900"/>
+</p>
+
+모델 예: `runs/plain_Spielberg/best/best_model.zip` (ST `[2,7]`, Roboracer 제원).  
+제목줄에 `slip`, `ay`가 보이면 **슬립 동역학이 시뮬에 살아 있는 상태**다.
 
 #### 재생 커맨드
 
 ```powershell
-# 한 스텝 스냅샷 (warmup 후 PNG)
+# Connectome kinematic 데모
 python viz_policy_layers.py --model connectome_sac_f1tenth_Spielberg_80k.zip `
-  --map Spielberg --use-cache --seed 0 --warmup 40 `
-  --min-speed 2 --max-speed 3.5 --out docs/figures/policy_layers_activation.png
-
-# 연속 활성화 GIF (길게: 제어 ~400스텝, stride 2, 프레임간격 100ms)
+  --map Spielberg --use-cache --min-speed 2 --max-speed 3.5
 python viz_policy_layers_gif.py --model connectome_sac_f1tenth_Spielberg_80k.zip `
-  --map Spielberg --use-cache --seed 0 `
-  --max-steps 400 --stride 2 --duration-ms 100 --max-frames 250 `
-  --min-speed 2 --max-speed 3.5 --physics kinematic --start-idx 10 `
-  --out docs/figures/policy_layers_activation.gif
+  --map Spielberg --use-cache --max-steps 400 --stride 2 --physics kinematic `
+  --min-speed 2 --max-speed 3.5 --out docs/figures/policy_layers_activation.gif
+
+# Plain ST Physical AI
+python viz_policy_layers_plain_gif.py `
+  --model runs/plain_Spielberg/best/best_model.zip `
+  --physics st --min-speed 2 --max-speed 7 --max-steer 0.3735 `
+  --max-steps 400 --stride 2 --seed 7 `
+  --out docs/figures/policy_layers_activation_st_plain.gif
 ```
 
-참고: 랜덤 스폰이 센터라인과 **헤딩이 반대**이면 `reversed` terminate가 바로 걸릴 수 있다.  
-GIF 스크립트는 `--start-idx`로 센터라인에 정렬된 pose를 넣어 긴 구간을 뽑는다.  
-80k zip은 **kinematic** 학습본이므로 `--physics kinematic`을 맞춘다 (기본 env는 ST).
+GIF는 `--start-idx`로 CL에 **헤딩 정렬**된 출발을 쓴다 (관측에 CL을 넣는 것이 아님).
 
 ---
 
@@ -355,19 +387,25 @@ Jetson에서는 env step이 짧고 배치 추론이 잦을수록 GPU 비율이 �
      675              5
 ```
 
-### 보상 (privileged · v4)
+### 보상 (privileged · ST Physical AI)
+
+관측에는 CL이 없고, 보상만 CL 진행을 쓴다 (`reward_mode=privileged_progress_st_roboracer_v2`).
+
+대략:
 
 \[
 \begin{aligned}
-r &= 4\max(\Delta s,0) + 0.2 + 0.15\max(\cos\phi,0)
-    + 0.25\,v_{\mathrm{norm}}\max(\cos\phi,0)\\
-    &\quad - 0.1\max(\mathrm{CTE}-0.7,0) - 0.4\max(-\Delta s,0)\\
-r &\leftarrow \mathrm{clip}(r,-2,10)
+r &\approx 5\max(\Delta s,0) - 1\max(-\Delta s,0)
+  + 0.15\max(\Delta s,0)\,v_{\mathrm{norm}}\\
+  &\quad - 0.6\max(|\beta|-0.04,0) - 0.05\max(|a_y|-0.85 a_{\mathrm{lat}},0)\\
+  &\quad - 0.04\,\dot\delta_{\mathrm{cmd}} - 0.12\max(\mathrm{CTE}-0.55,0)
 \end{aligned}
 \]
 
-충돌 \(-10\), 랩 \(+30\) (truncate). alive 항으로 **긴 주행 > 짧은 충돌**.  
-**실차 추론에는 센터라인 불필요** (관측 mapless).
+충돌 \(-10\), 랩 \(+30\) (truncate).  
+역주행은 스폰 유예 후 **연속 프레임**일 때만 terminate.
+
+**실차 추론에는 센터라인 불필요.**
 
 ### 제어 · 동역학
 
@@ -376,8 +414,8 @@ r &\leftarrow \mathrm{clip}(r,-2,10)
 v^{\mathrm{cmd}}=v_{\min}+a_1(v_{\max}-v_{\min})
 \]
 
-기본 커리큘럼 \(v\in[2,3.5]\), \(\delta_{\max}=0.30\), 물리 \(\Delta t=0.025\) (40 Hz),  
-제어 `frame_skip=4` → \(\Delta t_{\mathrm{ctrl}}=0.1\) (~10 Hz), \(L=0.33\).
+기본: \(v\in[2,7]\), \(\delta_{\max}=0.3735\) (실측), ST RK4,  
+\(\Delta t=0.025\) (40 Hz), `frame_skip=4` → 제어 ~10 Hz, \(L=0.33\).
 
 ---
 
@@ -418,11 +456,14 @@ a ~ Actor(feat)                                 # SAC
 | `target_entropy` | **-2.0** (행동 dim=2) |
 
 ```powershell
-python train_sac_connectome.py --use-cache --map Spielberg --timesteps 150000 --fresh `
-  --device auto --max-neurons 256 --min-speed 2 --max-speed 3.5 --max-steer 0.30
+# Physical AI plain (권장 베이스라인)
+python train_sac_plain.py --map Spielberg --timesteps 200000 --fresh `
+  --device auto --min-speed 2 --max-speed 7 --max-steer 0.3735 --physics st `
+  --save-path plain_sac_f1tenth_Spielberg_st27.zip
 
-python train_sac_plain.py --map Spielberg --timesteps 150000 --fresh `
-  --min-speed 2 --max-speed 3.5 --max-steer 0.30
+# Connectome (plain 안정 후)
+python train_sac_connectome.py --use-cache --map Spielberg --timesteps 200000 --fresh `
+  --device auto --max-neurons 256 --min-speed 2 --max-speed 7 --max-steer 0.3735 --physics st
 ```
 
 | 로그 | 의미 |
@@ -439,21 +480,17 @@ python train_sac_plain.py --map Spielberg --timesteps 150000 --fresh `
 
 | 경로 | 역할 |
 |------|------|
-| `docs/figures/*.png` / `*.gif` | 구조·인코더·메모리·**레이어 활성화** 그림 |
-| `f1tenth_mapless_env.py` | Gym env (ST / kinematic, 40 m·40 Hz) |
-| `vehicle_dynamics.py` | Single-Track RK4 · 슬립/μ |
-| `policy_sac_connectome.py` | 인코더 + temporal connectome + fuse (+ `forward_intermediates`) |
-| `connectome_rnn.py` | leaky RNN (**CUDA dense / CPU sparse**) |
-| `connectome_loader.py` | hemibrain 서브서킷 |
-| `train_sac_connectome.py` | SAC (`--device`) |
-| `train_sac_plain.py` | MLP ablation |
-| `watch_sac_f1tenth.py` | 주행 GIF + traj PNG |
-| `viz_policy_layers.py` | 한 스텝 레이어/커넥톰 활성화 PNG |
-| `viz_policy_layers_gif.py` | 연속 활성화 GIF |
-| `plot_sac_results.py` | plain/connectome eval 곡선 |
-| `train_callbacks.py` | length-aware Eval + ckpt |
-| `roboracer_connectome_node.py` | Jetson `/drive` 스케치 |
-| `maps/ifac_roboracer*` | IFAC 트랙 맵·센터라인 (전이 실험) |
+| `docs/figures/*.png` / `*.gif` | 구조·A/B·**레이어 활성화**(connectome / ST plain) |
+| `f1tenth_mapless_env.py` | Gym: mapless obs + privileged reward + ST/kinematic |
+| `vehicle_dynamics.py` | ST RK4, `STParams.roboracer()` |
+| `policy_sac_connectome.py` | 인코더 + connectome + `forward_intermediates` |
+| `connectome_rnn.py` | leaky RNN (CUDA dense / CPU sparse) |
+| `train_sac_plain.py` / `train_sac_connectome.py` | 학습 (`--physics`, `[2,7]`, steer 0.3735) |
+| `watch_sac_f1tenth.py` | 주행 GIF + traj |
+| `viz_policy_layers.py` / `_gif.py` | connectome 활성화 |
+| `viz_policy_layers_plain_gif.py` | **ST plain** h1/h2 + slip/ay GIF |
+| `Roboracer-2026-main/` | 실차 ROS2·제원·Cartographer 맵 |
+| `maps/ifac_roboracer*` | IFAC 맵·센터라인 |
 
 ---
 
@@ -479,33 +516,34 @@ Roboracer: /scan → Stanley → /drive
 ## 9. 권장 순서
 
 1. Env 스모크 `python f1tenth_mapless_env.py`  
-2. plain SAC로 `ep_len` 상승 확인  
-3. connectome SAC `--device cuda` (가능하면)  
-4. watch GIF + **레이어 활성화 GIF** (`viz_policy_layers_gif.py`)  
-5. 속도 커리큘럼 3.5→7 (ST)  
-6. Jetson zip + ROS2 저속  
+2. **plain ST** `[2,7]` — `ep_len`↑ · `[lap]` 확인  
+3. ST plain 레이어 GIF (`viz_policy_layers_plain_gif.py`)  
+4. connectome ST 같은 제원으로 A/B  
+5. ajou / IFAC fine-tune  
+6. (후속) Isaac Sim 검증 · Jetson `/drive`  
 
 ---
 
 ## 10. 한계 · FAQ
 
-- 5프레임 메모리 ≠ 에피소드 전체 LSTM 상태  
-- env 물리/레이캐스트는 CPU — 정책만 GPU  
-- `fly-brain`(전뇌 LIF)은 참고용; 본선 RL 루프와는 별개  
-- zip / cache / watch_out gitignore  
-- 레이어 GIF의 top-k 뉴런 ≠ 해부학 라벨; **정성 해석용**  
+- **Mapless = 관측**. 센터라인은 보상용 privileged일 뿐.  
+- 슬립은 ST β + 보상 패널티로 반영. 종슬립·서스펜션은 없음.  
+- 5프레임 메모리 ≠ 에피소드 전체 LSTM  
+- env 물리/레이캐스트 CPU — 정책만 GPU  
+- zip / cache / `runs/` / `watch_out*` gitignore  
+- 레이어 GIF top-k ≠ 해부학 라벨  
 
-**Q. 인코더 없이 안 되나요?**  
-A. 가능하지만(plain MLP) 빔 패턴을 정책이 통째로 배워야 해서 샘플이 더 필요합니다.
+**Q. 센터라인 넣으면 mapless 아니잖아?**  
+A. 관측에는 안 넣습니다. 학습 서버만 CL로 \(\Delta s\)/랩을 계산합니다. 실차는 LiDAR만.
 
-**Q. Jetson에서 CPU만 쓰이면?**  
-A. `torch.cuda.is_available()` 확인, `--device cuda`, Jetson용 PyTorch 휠 설치.
+**Q. 슬립 고려했어?**  
+A. 네. ST 상태 β와 \(a_y\), 보상 패널티. GIF 제목줄 `slip`/`ay`로 확인 가능.
 
 **Q. 커넥톰이 LSTM인가요?**  
-A. 역할은 같고, 구조는 **고정 초파리 배선 + 학습 scale**입니다.
+A. 역할은 같고, 구조는 고정 초파리 배선 + 학습 scale입니다.
 
-**Q. 활성화 GIF에서 속도가 3.x에서 멈추는데?**  
-A. 해당 zip/커맨드가 `--max-speed 3.5`로 묶여 있기 때문입니다. 7 m/s는 ST 재학습 zip이 필요합니다 (위 절).
+**Q. Isaac Sim?**  
+A. 다음 스테이지로 적합. 지금은 Gym ST로 랩 안정화가 우선.
 
 ---
 
