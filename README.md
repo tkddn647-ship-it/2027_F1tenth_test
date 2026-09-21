@@ -96,6 +96,42 @@ python plot_sac_results.py   # → docs/figures/sac_ab_eval_curves.png
 
 체크포인트: `runs/plain_Spielberg/`, `runs/connectome_Spielberg/` (gitignore). zip은 로컬 보관.
 
+### 왜 7 m/s까지 안 올라가냐?
+
+속도는 정책이 “마음대로” 올리는 게 아니라 **환경 상한**에 클립됩니다.
+
+```text
+v_cmd = min_speed + action_speed * (max_speed - min_speed)
+```
+
+지금까지 학습은 **안정 커리큘럼**으로 `--max-speed 3.5`를 썼습니다.  
+그래서 액션이 1.0이어도 **물리적으로 3.5 m/s가 천장**입니다. env 상수 `MAX_SPEED=7.0`은 있어도, train 인자가 막으면 7까지 안 갑니다.
+
+| 단계 | 목적 | 예시 |
+|------|------|------|
+| 1 (완료) | 생존·랩 | `--max-speed 3.5` |
+| 2 | 레이싱 가속 | 3.5 ckpt `--resume` → `--max-speed 5.0` |
+| 3 | F1TENTH 상한 | → `--max-speed 7.0` + 코너 감속 보상 강화 |
+
+```powershell
+# 다음 레이싱 단계 예 (3.5 랩 가능 모델에서 이어 학습)
+python train_sac_plain.py --map Spielberg --timesteps 100000 `
+  --min-speed 2 --max-speed 5.0 --max-steer 0.30
+# 그다음 7.0
+```
+
+진짜 “F1처럼”은 단순 max만 올리면 벽에 박습니다. **직선 가속 + 코너 감속**이 보상/관측에 드러나야 합니다 (다음 작업).
+
+### 제로샷 전이 · 실차 맵 `ajou`
+
+`--map ajou` → `Roboracer-2026-main/maps/cartographer_map_20260817_003202`.  
+Spielberg 학습 zip을 **재학습 없이** ajou에 올리면 (seed 0–5) plain/connectome 모두 **랩 완주·무충돌** (랩 ~15–23 s, 코스가 짧음).
+
+```powershell
+python watch_sac_f1tenth.py --model plain_sac_f1tenth_Spielberg.zip --map ajou --plain --seed 0
+python watch_sac_f1tenth.py --model connectome_sac_f1tenth_Spielberg_80k.zip --map ajou --use-cache --seed 0
+```
+
 ---
 
 ## 2. 모듈 개념 설명 (초심자용)

@@ -32,6 +32,15 @@ _EnvBase = gym.Env if _HAS_GYM else object
 
 ROOT = Path(__file__).resolve().parent
 RACETRACKS_DIR = ROOT / "f1tenth_racetracks"
+ROBORACER_MAPS = ROOT / "Roboracer-2026-main" / "maps"
+MAPS_DIR = ROOT / "maps"
+
+# 실차 Cartographer 별칭 (Roboracer-2026-main/maps)
+MAP_ALIASES = {
+    "ajou": "cartographer_map_20260817_003202",
+    "ajou_latest": "cartographer_map_20260817_003202",
+    "ajou_prev": "cartographer_map_20260817_002900",
+}
 
 N_BEAMS = 135
 HIST_LEN = 5
@@ -47,16 +56,38 @@ FOV = 4.71238898    # 270 deg
 
 
 def _resolve_map_yaml(map_name: str) -> Path:
+    """맵 이름/별칭/yaml 경로 → yaml Path.
+
+    우선순위: yaml 경로 → Roboracer maps → maps/ → f1tenth_racetracks
+    """
     p = Path(map_name)
     if p.suffix in {".yaml", ".yml"} and p.exists():
         return p.resolve()
-    race = RACETRACKS_DIR / map_name / f"{map_name}_map.yaml"
+
+    key = MAP_ALIASES.get(map_name, map_name)
+    for base in (ROBORACER_MAPS, MAPS_DIR):
+        cand = base / f"{key}.yaml"
+        if cand.exists():
+            return cand.resolve()
+
+    race = RACETRACKS_DIR / key / f"{key}_map.yaml"
     if race.exists():
-        return race
-    maps = ROOT / "maps" / f"{map_name}.yaml"
-    if maps.exists():
-        return maps
-    raise FileNotFoundError(f"맵 yaml 없음: {map_name}")
+        return race.resolve()
+
+    if ROBORACER_MAPS.exists():
+        hits = [
+            h
+            for h in ROBORACER_MAPS.glob(f"*{key}*.yaml")
+            if "origin" not in h.name
+        ]
+        if hits:
+            return sorted(hits)[0].resolve()
+
+    raise FileNotFoundError(
+        f"맵 yaml 없음: {map_name}\n"
+        f"  예: ajou | cartographer_map_20260817_003202 | Spielberg\n"
+        f"  또는 yaml 전체 경로"
+    )
 
 
 def _load_occupancy(map_yaml: Path):
@@ -76,19 +107,28 @@ def _load_occupancy(map_yaml: Path):
 
 
 def _load_centerline(map_yaml: Path) -> np.ndarray | None:
+    """Prefer CSV matching map stem; fall back to any *centerline*/*raceline*."""
     folder = map_yaml.parent
-    for pat in ("*centerline*.csv", "*raceline*.csv"):
-        hits = sorted(folder.glob(pat))
-        if not hits:
+    stem = map_yaml.stem
+    candidates: list[Path] = []
+    for pat in (f"{stem}_centerline.csv", f"{stem}*centerline*.csv", "*centerline*.csv", "*raceline*.csv"):
+        candidates.extend(sorted(folder.glob(pat)))
+    seen: set[Path] = set()
+    for hit in candidates:
+        if hit in seen:
             continue
-        raw = np.genfromtxt(hits[0], delimiter=",", comments="#")
+        seen.add(hit)
+        raw = np.genfromtxt(hit, delimiter=",", comments="#")
         if raw.ndim == 1 or raw.shape[0] < 20:
             continue
         xy = raw[:, :2].astype(np.float64)
         xy = xy[np.isfinite(xy).all(axis=1)]
+        if len(xy) < 20:
+            continue
         if len(xy) > 600:
             idx = np.linspace(0, len(xy) - 1, 600).astype(int)
             xy = xy[idx]
+        print(f"[f1tenth_mapless] centerline: {hit.name} ({len(xy)} pts)")
         return xy
     return None
 
