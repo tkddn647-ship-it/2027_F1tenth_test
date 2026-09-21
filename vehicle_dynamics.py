@@ -42,6 +42,38 @@ F110_ST_PARAMS = dict(
     v_max=20.0,
 )
 
+# Roboracer-2026-main 실차 정렬 (vehicle_geometry + stanley + speed_profile)
+# - L=0.33 m, 실측 전륜각 ±21.4° (0.3735 rad)
+# - a_lat≈6, a_accel≈7, a_brake≈4 (scripts/speed_profile.py VEHICLE)
+# - 타이어 C_* 는 f1tenth_gym 식별값 유지, μ 는 a_lat/g 로 맞춤
+ROBORACER_A_LAT = 6.0
+ROBORACER_A_ACCEL = 7.0
+ROBORACER_A_BRAKE = 4.0
+ROBORACER_STEER_MAX = 0.3735  # max_steering_angle_real_rad
+ROBORACER_WHEELBASE = 0.33
+ROBORACER_HALF_WIDTH = 0.15
+ROBORACER_FRONT = 0.50
+ROBORACER_REAR = 0.10
+
+ROBORACER_ST_PARAMS = dict(
+    mu=ROBORACER_A_LAT / 9.81,  # ≈0.61 — 코너 그립을 실차 a_lat에 맞춤
+    C_Sf=4.718,
+    C_Sr=5.4562,
+    lf=0.15875,
+    lr=0.17145,  # lf+lr = 0.3302 ≈ WHEELBASE_M
+    h=0.074,
+    m=3.74,
+    I=0.04712,
+    s_min=-ROBORACER_STEER_MAX,
+    s_max=ROBORACER_STEER_MAX,
+    sv_min=-3.2,
+    sv_max=3.2,
+    v_switch=7.319,
+    a_max=ROBORACER_A_ACCEL,
+    v_min=-5.0,
+    v_max=20.0,
+)
+
 
 @njit(cache=True)
 def accl_constraints(vel, accl, v_switch, a_max, v_min, v_max):
@@ -177,6 +209,11 @@ class STParams:
     @classmethod
     def f110_default(cls) -> "STParams":
         return cls(**F110_ST_PARAMS)
+
+    @classmethod
+    def roboracer(cls) -> "STParams":
+        """Roboracer-2026-main 실차 제원 정렬 ST 파라미터."""
+        return cls(**ROBORACER_ST_PARAMS)
 
     def as_tuple(self):
         return (

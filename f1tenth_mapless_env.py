@@ -22,6 +22,10 @@ from PIL import Image
 
 from vehicle_dynamics import (
     STParams,
+    ROBORACER_A_LAT,
+    ROBORACER_HALF_WIDTH,
+    ROBORACER_STEER_MAX,
+    ROBORACER_WHEELBASE,
     integrate_st_rk4,
     lateral_accel,
     pid_speed_steer,
@@ -54,16 +58,19 @@ MAP_ALIASES = {
 N_BEAMS = 135
 HIST_LEN = 5
 OBS_DIM = N_BEAMS * HIST_LEN + HIST_LEN  # 680
-MIN_SPEED = 0.5   # 코너 감속 여유 (레이싱)
+MIN_SPEED = 2.0   # Physical AI 커리큘럼 하한 (코너 감속 여유는 보상/슬립)
 MAX_SPEED = 7.0
-MAX_STEER = 0.4189
-WHEELBASE = 0.33
+MAX_STEER = ROBORACER_STEER_MAX  # 실측 전륜각 ±21.4°
+WHEELBASE = ROBORACER_WHEELBASE
+COLLISION_INFLATE = ROBORACER_HALF_WIDTH  # 실측 반폭 0.15 m
 DT = 0.025          # 40 Hz lidar / control tick aggregation
 PHYS_DT = 0.005     # 5 ms dynamics substep
 FRAME_SKIP = 4      # 제어 ~10 Hz
 RAY_RANGE = 40.0
 FOV = 4.71238898
 G = 9.81
+REVERSE_GRACE_STEPS = 25  # 스폰 직후 역주행 판정 유예 (~2.5 s @10 Hz)
+REVERSE_STREAK = 8        # 연속 역주행 프레임 후 terminate
 
 
 def _resolve_map_yaml(map_name: str) -> Path:
@@ -186,13 +193,14 @@ class F1TenthMaplessEnv(_EnvBase):
         self.frame_skip = int(max(1, frame_skip))
         self.dt_ctrl = DT * self.frame_skip
         self.physics = physics
-        self.st_params = STParams.f110_default()
+        # 기본: Roboracer 실차 제원 ST (슬립/μ/조향한계)
+        self.st_params = STParams.roboracer()
         self.st_params.s_min = -self.MAX_STEER
         self.st_params.s_max = self.MAX_STEER
-        self.st_params.v_max = max(self.MAX_SPEED, self.st_params.v_max)
+        self.st_params.v_max = max(self.MAX_SPEED * 1.05, self.st_params.v_max)
         if mu is not None:
             self.st_params.mu = float(mu)
-
+        self.a_lat_lim = float(ROBORACER_A_LAT)
         self._lidar_hist: deque[np.ndarray] = deque(maxlen=HIST_LEN)
         self._yaw_hist: deque[float] = deque(maxlen=HIST_LEN)
         self._ray_step = max(float(self.resolution), 0.05)
@@ -228,9 +236,10 @@ class F1TenthMaplessEnv(_EnvBase):
             f"lidar={RAY_RANGE}m@{1.0/DT:.0f}Hz ctrl~{1.0/self.dt_ctrl:.0f}Hz "
             f"skip={self.frame_skip} speed=[{self.MIN_SPEED},{self.MAX_SPEED}] "
             f"physics={self.physics} mu={self.st_params.mu:.2f} "
+            f"steer±{self.MAX_STEER:.3f} a_lat={self.a_lat_lim:.1f} "
             f"cl_loop={self.cl_loop:.1f}m starts={len(self._start_pool)}"
         )
-
+        self._reverse_streak = 0
     def world_to_pixel(self, x: float, y: float) -> tuple[int, int]:
         ox, oy = float(self.origin[0]), float(self.origin[1])
         col = int((x - ox) / self.resolution)
@@ -243,7 +252,9 @@ class F1TenthMaplessEnv(_EnvBase):
         y = oy + (self.h - row - 0.5) * self.resolution
         return x, y
 
-    def is_occupied(self, x: float, y: float, inflate: float = 0.12) -> bool:
+    def is_occupied(self, x: float, y: float, inflate: float | None = None) -> bool:
+        if inflate is None:
+            inflate = COLLISION_INFLATE
         for dx, dy in ((0.0, 0.0), (inflate, 0), (-inflate, 0), (0, inflate), (0, -inflate)):
             r, c = self.world_to_pixel(x + dx, y + dy)
             if r < 0 or c < 0 or r >= self.h or c >= self.w:
@@ -299,13 +310,17 @@ class F1TenthMaplessEnv(_EnvBase):
         if self._start_pool:
             base = self._start_pool[int(self.rng.integers(0, len(self._start_pool)))].copy()
             x, y, th = float(base[0]), float(base[1]), float(base[2])
-            # 헤딩·횡방향 노이즈 → 코너/오프셋 데이터
-            th = th + float(self.rng.uniform(-0.12, 0.12))
-            lat = float(self.rng.uniform(-0.15, 0.15))
+            # 횡방향만 소량 노이즈 (헤딩은 CL 진행 방향으로 재정렬)
+            lat = float(self.rng.uniform(-0.12, 0.12))
             nx, ny = np.cos(th - np.pi / 2), np.sin(th - np.pi / 2)
             x2, y2 = x + lat * nx, y + lat * ny
             if not self.is_occupied(x2, y2, 0.2):
                 x, y = x2, y2
+            # 진행 방향 = 센터라인 접선 (역헤딩 스폰 방지)
+            idx = self._nearest_cl(np.array([x, y]))
+            tang = self._cl_tangent(idx)
+            th = float(np.arctan2(tang[1], tang[0]))
+            th += float(self.rng.uniform(-0.06, 0.06))
             return np.array([x, y, th], dtype=np.float64)
 
         free = np.argwhere(~self.occ)
@@ -338,7 +353,8 @@ class F1TenthMaplessEnv(_EnvBase):
         if self.centerline is None:
             return 0
         n = len(self.centerline)
-        cand = (self.cl_idx + np.arange(-3, 50)) % n
+        # 전·후방 모두 검색 (한쪽만 보면 스폰 직후 인덱스 점프 → 가짜 역주행)
+        cand = (self.cl_idx + np.arange(-25, 40)) % n
         d = np.linalg.norm(self.centerline[cand] - pos, axis=1)
         return int(cand[int(np.argmin(d))])
 
@@ -392,7 +408,7 @@ class F1TenthMaplessEnv(_EnvBase):
             pose = self._find_start_pose()
             self._start_pose = pose.copy()
         self.x, self.y, self.theta = map(float, pose)
-        self.v = max(self.MIN_SPEED, 1.0)
+        self.v = float(np.clip(self.MIN_SPEED + 0.3, self.MIN_SPEED, self.MAX_SPEED))
         self.yaw_rate = 0.0
         self.beta = 0.0
         self.delta = 0.0
@@ -404,7 +420,12 @@ class F1TenthMaplessEnv(_EnvBase):
         self.last_steer = 0.0
         self.last_speed_cmd = self.v
         self._prev_steer_cmd = 0.0
+        self._reverse_streak = 0
         self.cl_idx = self._nearest_cl(np.array([self.x, self.y]))
+        # 커스텀 pose가 아니면 헤딩을 CL 접선에 한 번 더 맞춤
+        if not (options and "pose" in options) and self.centerline is not None:
+            tang = self._cl_tangent(self.cl_idx)
+            self.theta = float(np.arctan2(tang[1], tang[0]))
         self._lidar_hist.clear()
         self._yaw_hist.clear()
         obs = self._get_obs()
@@ -416,6 +437,8 @@ class F1TenthMaplessEnv(_EnvBase):
             "ray_range": RAY_RANGE,
             "physics": self.physics,
             "mu": self.st_params.mu,
+            "a_lat_lim": self.a_lat_lim,
+            "max_steer": self.MAX_STEER,
         }
         return (obs, info) if _HAS_GYM else obs
 
@@ -477,7 +500,7 @@ class F1TenthMaplessEnv(_EnvBase):
             if self.v > self.MAX_SPEED:
                 self.v = self.MAX_SPEED
 
-        collided = self.is_occupied(self.x, self.y, inflate=0.12)
+        collided = self.is_occupied(self.x, self.y)
         ds = cte = heading_cos = 0.0
         if self.centerline is not None and not collided:
             pos = np.array([self.x, self.y])
@@ -516,18 +539,19 @@ class F1TenthMaplessEnv(_EnvBase):
         self.steps += 1
         obs = self._get_obs()
 
-        # 레이싱 보상: 진행 위주 + 슬립/횡가속/조향급변 패널티 (alive 제거)
-        mu = self.st_params.mu
-        ay_lim = mu * G
+        # Physical AI 보상: 진행 + 실차 a_lat/슬립/조향급변 패널티
         slip = abs(self.beta)
-        ay_excess = max(abs(self.ay) - 0.85 * ay_lim, 0.0)
+        ay_excess = max(abs(self.ay) - 0.85 * self.a_lat_lim, 0.0)
+        # 속도 활용 장려 (상한 근처만 살짝) — 슬립/ay 패널티와 균형
+        v_norm = (self.v - self.MIN_SPEED) / max(self._speed_span, 1e-6)
         reward = (
             5.0 * max(sum_ds, 0.0)
-            - 0.8 * max(-sum_ds, 0.0)
-            - 0.05 * steer_rate
-            - 0.5 * max(slip - 0.05, 0.0)
-            - 0.02 * ay_excess
-            - 0.1 * max(last_cte - 0.6, 0.0)
+            - 1.0 * max(-sum_ds, 0.0)
+            - 0.04 * steer_rate
+            - 0.6 * max(slip - 0.04, 0.0)
+            - 0.05 * ay_excess
+            - 0.12 * max(last_cte - 0.55, 0.0)
+            + 0.15 * max(sum_ds, 0.0) * v_norm
         )
         reward = float(np.clip(reward, -3.0, 12.0))
         if collided:
@@ -535,8 +559,15 @@ class F1TenthMaplessEnv(_EnvBase):
         if self.lap_completed:
             reward += 30.0
 
-        # 역주행 종료
-        reverse = last_hcos < -0.25 and sum_ds < 0.0
+        # 역주행: 스폰 유예 + 연속 프레임 요구 (가짜 reverse 학살 방지)
+        reverse_now = last_hcos < -0.35 and sum_ds < -0.02
+        if reverse_now and self.steps >= REVERSE_GRACE_STEPS:
+            self._reverse_streak += 1
+        else:
+            self._reverse_streak = 0
+        reverse = self._reverse_streak >= REVERSE_STREAK
+        if reverse_now and not reverse:
+            reward -= 0.5  # soft penalty while streak builds
         terminated = bool(collided or reverse)
         truncated = self.lap_completed or self.steps >= self.MAX_STEPS
         info = {
@@ -550,12 +581,13 @@ class F1TenthMaplessEnv(_EnvBase):
             "slip_angle": self.beta,
             "yaw_rate": self.yaw_rate,
             "ay": self.ay,
-            "mu": mu,
+            "mu": self.st_params.mu,
+            "a_lat_lim": self.a_lat_lim,
             "steering_angle": self.last_steer,
             "pos": np.array([self.x, self.y], dtype=np.float32),
             "theta": self.theta,
             "track_name": self.map_name,
-            "reward_mode": "privileged_progress_st_v1",
+            "reward_mode": "privileged_progress_st_roboracer_v2",
             "physics": self.physics,
             "ctrl_hz": 1.0 / self.dt_ctrl,
         }

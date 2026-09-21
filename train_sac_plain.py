@@ -22,10 +22,12 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--fresh", action="store_true")
     p.add_argument("--resume", type=str, default=None, help="이어 학습할 zip")
-    p.add_argument("--min-speed", type=float, default=0.5)
+    p.add_argument("--min-speed", type=float, default=2.0)
     p.add_argument("--max-speed", type=float, default=7.0)
-    p.add_argument("--max-steer", type=float, default=0.30)
+    p.add_argument("--max-steer", type=float, default=0.3735, help="Roboracer 실측 전륜각")
+    p.add_argument("--physics", type=str, default="st", choices=["st", "kinematic"])
     p.add_argument("--device", type=str, default="auto")
+    p.add_argument("--save-path", type=str, default=None)
     args = p.parse_args()
 
     device = args.device
@@ -40,14 +42,16 @@ def main():
                 min_speed=args.min_speed,
                 max_speed=args.max_speed,
                 max_steer=args.max_steer,
+                physics=args.physics,
             )
         )
 
     env = make_vec_env(_env_fn, n_envs=args.n_envs, seed=args.seed)
-    save_path = f"plain_sac_f1tenth_{args.map}.zip"
+    save_path = args.save_path or f"plain_sac_f1tenth_{args.map}.zip"
     print(
         f"[plain-sac] obs={OBS_DIM} map={args.map} "
-        f"speed=[{args.min_speed},{args.max_speed}] device={device}"
+        f"speed=[{args.min_speed},{args.max_speed}] steer={args.max_steer} "
+        f"physics={args.physics} device={device}"
     )
 
     if args.fresh and Path(save_path).exists():

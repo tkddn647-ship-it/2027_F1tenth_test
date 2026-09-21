@@ -104,9 +104,10 @@ def main():
         help="default: 512 on CUDA, 256 on CPU",
     )
     parser.add_argument("--learning-starts", type=int, default=3_000)
-    parser.add_argument("--min-speed", type=float, default=0.5)
+    parser.add_argument("--min-speed", type=float, default=2.0)
     parser.add_argument("--max-speed", type=float, default=7.0)
-    parser.add_argument("--max-steer", type=float, default=0.30)
+    parser.add_argument("--max-steer", type=float, default=0.3735)
+    parser.add_argument("--physics", type=str, default="st", choices=["st", "kinematic"])
     parser.add_argument(
         "--device",
         type=str,
@@ -141,6 +142,7 @@ def main():
                 min_speed=args.min_speed,
                 max_speed=args.max_speed,
                 max_steer=args.max_steer,
+                physics=args.physics,
             )
         )
 
