@@ -21,8 +21,9 @@ def main():
     p.add_argument("--n-envs", type=int, default=4)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--fresh", action="store_true")
-    p.add_argument("--min-speed", type=float, default=2.0)
-    p.add_argument("--max-speed", type=float, default=3.5)
+    p.add_argument("--resume", type=str, default=None, help="이어 학습할 zip")
+    p.add_argument("--min-speed", type=float, default=0.5)
+    p.add_argument("--max-speed", type=float, default=7.0)
     p.add_argument("--max-steer", type=float, default=0.30)
     p.add_argument("--device", type=str, default="auto")
     args = p.parse_args()
@@ -52,29 +53,44 @@ def main():
     if args.fresh and Path(save_path).exists():
         Path(save_path).replace(Path(save_path).with_suffix(".bak.zip"))
 
-    model = SAC(
-        "MlpPolicy",
-        env,
-        policy_kwargs=dict(net_arch=[256, 256]),
-        learning_rate=3e-4,
-        buffer_size=200_000,
-        batch_size=512 if device == "cuda" else 256,
-        learning_starts=2_000,
-        gamma=0.99,
-        tau=0.005,
-        train_freq=1,
-        gradient_steps=1,
-        ent_coef="auto",
-        target_entropy=-2.0,  # 탐험 과다로 짧은 에피소드 방지
-        verbose=1,
-        seed=args.seed,
-        device=device,
-    )
+    resume_path = None if args.fresh else args.resume
+    if resume_path is None and not args.fresh and Path(save_path).exists():
+        resume_path = save_path
+
+    reset_ts = True
+    if resume_path and Path(resume_path).exists():
+        print(f"[plain-sac] resume {resume_path}")
+        model = SAC.load(resume_path, env=env, device=device)
+        model.set_env(env)
+        reset_ts = False
+    else:
+        model = SAC(
+            "MlpPolicy",
+            env,
+            policy_kwargs=dict(net_arch=[256, 256]),
+            learning_rate=3e-4,
+            buffer_size=200_000,
+            batch_size=512 if device == "cuda" else 256,
+            learning_starts=2_000,
+            gamma=0.99,
+            tau=0.005,
+            train_freq=1,
+            gradient_steps=1,
+            ent_coef="auto",
+            target_entropy=-2.0,
+            verbose=1,
+            seed=args.seed,
+            device=device,
+        )
     log_dir = Path(f"runs/plain_{args.map}")
     callbacks = make_train_callbacks(
         _env_fn, log_dir, n_envs=args.n_envs, seed=args.seed
     )
-    model.learn(total_timesteps=args.timesteps, callback=callbacks)
+    model.learn(
+        total_timesteps=args.timesteps,
+        callback=callbacks,
+        reset_num_timesteps=reset_ts,
+    )
     model.save(save_path)
     best = log_dir / "best" / "best_model.zip"
     print(f"[plain-sac] saved last {save_path}")

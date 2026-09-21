@@ -134,11 +134,14 @@ class ConnectomeTemporalFeatures(BaseFeaturesExtractor):
         self._features_dim = fuse_dim
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        return self.forward_intermediates(observations)["fuse"]
+
+    def forward_intermediates(self, observations: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Return named activations for visualization / debugging."""
         b = observations.shape[0]
         lidar = observations[:, :LIDAR_DIM].reshape(b, self.hist_len, self.n_beams)
         yaw = observations[:, LIDAR_DIM:]
 
-        # GPU-friendly: encode all T frames in one batched Conv1d
         lidar_bt = lidar.reshape(b * self.hist_len, self.n_beams)
         z_l = self.lidar_enc(lidar_bt).reshape(b, self.hist_len, -1)
         z_i = self.imu_enc(yaw.reshape(b * self.hist_len, 1)).reshape(b, self.hist_len, -1)
@@ -146,6 +149,8 @@ class ConnectomeTemporalFeatures(BaseFeaturesExtractor):
 
         h = None
         y = None
+        h_seq = []
+        y_seq = []
         for t in range(self.hist_len):
             z_t = z[:, t, :]
             if self.learn_connectome:
@@ -153,10 +158,27 @@ class ConnectomeTemporalFeatures(BaseFeaturesExtractor):
             else:
                 with torch.no_grad():
                     y, h = self.brain(z_t.detach(), h=h, n_steps=self.n_inner_steps)
+            h_seq.append(h)
+            y_seq.append(y)
 
         feat = z.mean(dim=1)
-        assert y is not None
-        return self.fuse(torch.cat([self.skip(feat), y], dim=-1))
+        assert y is not None and h is not None
+        skip = self.skip(feat)
+        fuse = self.fuse(torch.cat([skip, y], dim=-1))
+        return {
+            "lidar": lidar,
+            "yaw": yaw,
+            "z_lidar": z_l,
+            "z_imu": z_i,
+            "z": z,
+            "h_seq": torch.stack(h_seq, dim=1),  # (B,T,N)
+            "y_seq": torch.stack(y_seq, dim=1),  # (B,T,DN)
+            "h": h,
+            "y_dn": y,
+            "skip": skip,
+            "fuse": fuse,
+            "scale_abs_mean": self.brain.scale.detach().abs().mean().reshape(1),
+        }
 
 
 def make_sac_policy_kwargs(

@@ -5,10 +5,11 @@ F1TENTH mapless Gymnasium env (관측 mapless / 보상 privileged).
 
 실차 정렬:
   LiDAR range 40 m, 측정 주기 40 Hz → DT=0.025
-  제어는 frame_skip=4 → 약 10 Hz (히스토리도 이 간격)
+  물리 서브스텝 5 ms, 제어 frame_skip=4 → ~10 Hz
+  동역학: f1tenth_gym Single-Track (타이어 슬립 / μ)
 
 관측 (dim=680): LiDAR 135×5 + yaw×5
-행동: [steer_norm, speed_norm]
+행동: [steer_norm, speed_norm] → 조향각 목표 + 속도 목표 (PID→가속/조향속도)
 """
 
 from __future__ import annotations
@@ -18,6 +19,13 @@ from pathlib import Path
 import numpy as np
 import yaml
 from PIL import Image
+
+from vehicle_dynamics import (
+    STParams,
+    integrate_st_rk4,
+    lateral_accel,
+    pid_speed_steer,
+)
 
 try:
     import gymnasium as gym
@@ -35,24 +43,27 @@ RACETRACKS_DIR = ROOT / "f1tenth_racetracks"
 ROBORACER_MAPS = ROOT / "Roboracer-2026-main" / "maps"
 MAPS_DIR = ROOT / "maps"
 
-# 실차 Cartographer 별칭 (Roboracer-2026-main/maps)
 MAP_ALIASES = {
     "ajou": "cartographer_map_20260817_003202",
     "ajou_latest": "cartographer_map_20260817_003202",
     "ajou_prev": "cartographer_map_20260817_002900",
+    "ifac": "ifac_roboracer",
+    "ifac_roboracer": "ifac_roboracer",
 }
 
 N_BEAMS = 135
 HIST_LEN = 5
 OBS_DIM = N_BEAMS * HIST_LEN + HIST_LEN  # 680
-MIN_SPEED = 2.0
+MIN_SPEED = 0.5   # 코너 감속 여유 (레이싱)
 MAX_SPEED = 7.0
 MAX_STEER = 0.4189
 WHEELBASE = 0.33
-DT = 0.025          # 40 Hz (실차 LiDAR 주기)
-FRAME_SKIP = 4      # 제어 ~10 Hz; hist span ≈ 0.4 s
-RAY_RANGE = 40.0    # 실차 40 m
-FOV = 4.71238898    # 270 deg
+DT = 0.025          # 40 Hz lidar / control tick aggregation
+PHYS_DT = 0.005     # 5 ms dynamics substep
+FRAME_SKIP = 4      # 제어 ~10 Hz
+RAY_RANGE = 40.0
+FOV = 4.71238898
+G = 9.81
 
 
 def _resolve_map_yaml(map_name: str) -> Path:
@@ -134,7 +145,7 @@ def _load_centerline(map_yaml: Path) -> np.ndarray | None:
 
 
 class F1TenthMaplessEnv(_EnvBase):
-    """Mapless obs + privileged progress reward."""
+    """Mapless obs + privileged progress reward + single-track tire dynamics."""
 
     metadata = {"render_modes": []}
 
@@ -147,6 +158,8 @@ class F1TenthMaplessEnv(_EnvBase):
         max_steer: float = MAX_STEER,
         max_steps: int = 3000,
         frame_skip: int = FRAME_SKIP,
+        mu: float | None = None,
+        physics: str = "st",  # "st" | "kinematic"
     ):
         self.map_yaml = _resolve_map_yaml(map_name)
         self.map_name = self.map_yaml.stem.replace("_map", "")
@@ -168,14 +181,20 @@ class F1TenthMaplessEnv(_EnvBase):
         self.MIN_SPEED = float(min_speed)
         self.MAX_SPEED = float(max_speed)
         self.MAX_STEER = float(max_steer)
-        self._speed_span = self.MAX_SPEED - self.MIN_SPEED
+        self._speed_span = max(self.MAX_SPEED - self.MIN_SPEED, 1e-6)
         self.MAX_STEPS = int(max_steps)
         self.frame_skip = int(max(1, frame_skip))
-        self.dt_ctrl = DT * self.frame_skip  # ~0.1 s
+        self.dt_ctrl = DT * self.frame_skip
+        self.physics = physics
+        self.st_params = STParams.f110_default()
+        self.st_params.s_min = -self.MAX_STEER
+        self.st_params.s_max = self.MAX_STEER
+        self.st_params.v_max = max(self.MAX_SPEED, self.st_params.v_max)
+        if mu is not None:
+            self.st_params.mu = float(mu)
 
         self._lidar_hist: deque[np.ndarray] = deque(maxlen=HIST_LEN)
         self._yaw_hist: deque[float] = deque(maxlen=HIST_LEN)
-        # resolution-step ray marching
         self._ray_step = max(float(self.resolution), 0.05)
 
         if _HAS_GYM:
@@ -190,6 +209,9 @@ class F1TenthMaplessEnv(_EnvBase):
 
         self.x = self.y = self.theta = self.v = 0.0
         self.yaw_rate = 0.0
+        self.beta = 0.0  # slip angle
+        self.delta = 0.0  # front wheel steer
+        self.ay = 0.0
         self.steps = 0
         self.phys_steps = 0
         self.cl_idx = 0
@@ -197,6 +219,7 @@ class F1TenthMaplessEnv(_EnvBase):
         self.lap_completed = False
         self.last_steer = 0.0
         self.last_speed_cmd = self.MIN_SPEED
+        self._prev_steer_cmd = 0.0
         self._start_pool = self._build_start_pool()
         self._start_pose = self._find_start_pose()
         print(
@@ -204,6 +227,7 @@ class F1TenthMaplessEnv(_EnvBase):
             f"obs={OBS_DIM} beams={N_BEAMS}x{HIST_LEN} "
             f"lidar={RAY_RANGE}m@{1.0/DT:.0f}Hz ctrl~{1.0/self.dt_ctrl:.0f}Hz "
             f"skip={self.frame_skip} speed=[{self.MIN_SPEED},{self.MAX_SPEED}] "
+            f"physics={self.physics} mu={self.st_params.mu:.2f} "
             f"cl_loop={self.cl_loop:.1f}m starts={len(self._start_pool)}"
         )
 
@@ -368,14 +392,18 @@ class F1TenthMaplessEnv(_EnvBase):
             pose = self._find_start_pose()
             self._start_pose = pose.copy()
         self.x, self.y, self.theta = map(float, pose)
-        self.v = self.MIN_SPEED
+        self.v = max(self.MIN_SPEED, 1.0)
         self.yaw_rate = 0.0
+        self.beta = 0.0
+        self.delta = 0.0
+        self.ay = 0.0
         self.steps = 0
         self.phys_steps = 0
         self._s_travel = 0.0
         self.lap_completed = False
         self.last_steer = 0.0
-        self.last_speed_cmd = self.MIN_SPEED
+        self.last_speed_cmd = self.v
+        self._prev_steer_cmd = 0.0
         self.cl_idx = self._nearest_cl(np.array([self.x, self.y]))
         self._lidar_hist.clear()
         self._yaw_hist.clear()
@@ -386,23 +414,68 @@ class F1TenthMaplessEnv(_EnvBase):
             "dt": DT,
             "frame_skip": self.frame_skip,
             "ray_range": RAY_RANGE,
+            "physics": self.physics,
+            "mu": self.st_params.mu,
         }
         return (obs, info) if _HAS_GYM else obs
 
+    def _st_state(self) -> np.ndarray:
+        return np.array(
+            [self.x, self.y, self.delta, self.v, self.theta, self.yaw_rate, self.beta],
+            dtype=np.float64,
+        )
+
+    def _apply_st_state(self, s: np.ndarray) -> None:
+        self.x, self.y = float(s[0]), float(s[1])
+        self.delta = float(np.clip(s[2], self.st_params.s_min, self.st_params.s_max))
+        self.v = float(s[3])
+        self.theta = float(s[4])
+        self.yaw_rate = float(s[5])
+        self.beta = float(s[6])
+        self.ay = lateral_accel(self.v, self.yaw_rate)
+
     def _physics_once(self, steer: float, speed_cmd: float) -> tuple[float, float, float, bool]:
-        """One 40 Hz tick. Returns (ds, cte, heading_cos, collided)."""
+        """One lidar-period tick (DT), with PHYS_DT ST substeps."""
         prev_th = self.theta
-        self.v = float(np.clip(
-            self.v + 0.5 * (speed_cmd - self.v),
-            self.MIN_SPEED,
-            self.MAX_SPEED,
-        ))
         steer_c = float(np.clip(steer, -self.MAX_STEER, self.MAX_STEER))
-        self.x += self.v * np.cos(self.theta) * DT
-        self.y += self.v * np.sin(self.theta) * DT
-        self.theta += (self.v / WHEELBASE) * np.tan(steer_c) * DT
-        self.yaw_rate = (self.theta - prev_th) / DT
-        self.phys_steps += 1
+        speed_c = float(np.clip(speed_cmd, self.MIN_SPEED, self.MAX_SPEED))
+
+        if self.physics == "kinematic":
+            self.v = float(np.clip(
+                self.v + 0.5 * (speed_c - self.v),
+                self.MIN_SPEED,
+                self.MAX_SPEED,
+            ))
+            self.delta = steer_c
+            self.x += self.v * np.cos(self.theta) * DT
+            self.y += self.v * np.sin(self.theta) * DT
+            self.theta += (self.v / WHEELBASE) * np.tan(steer_c) * DT
+            self.yaw_rate = (self.theta - prev_th) / DT
+            self.beta = 0.0
+            self.ay = self.v * self.yaw_rate
+            self.phys_steps += 1
+        else:
+            n_sub = max(1, int(round(DT / PHYS_DT)))
+            sub_dt = DT / n_sub
+            state = self._st_state()
+            for _ in range(n_sub):
+                accl, sv = pid_speed_steer(
+                    speed_c,
+                    steer_c,
+                    float(state[3]),
+                    float(state[2]),
+                    self.st_params.sv_max,
+                    self.st_params.a_max,
+                    self.st_params.v_max,
+                    self.st_params.v_min,
+                )
+                u = np.array([sv, accl], dtype=np.float64)
+                state = integrate_st_rk4(state, u, self.st_params, sub_dt)
+                self.phys_steps += 1
+            self._apply_st_state(state)
+            # keep within training speed band softly
+            if self.v > self.MAX_SPEED:
+                self.v = self.MAX_SPEED
 
         collided = self.is_occupied(self.x, self.y, inflate=0.12)
         ds = cte = heading_cos = 0.0
@@ -425,6 +498,8 @@ class F1TenthMaplessEnv(_EnvBase):
 
     def step(self, action):
         steer, speed_cmd = self.action_to_controls(action)
+        steer_rate = abs(steer - self._prev_steer_cmd) / max(self.dt_ctrl, 1e-6)
+        self._prev_steer_cmd = steer
         self.last_steer, self.last_speed_cmd = steer, speed_cmd
 
         sum_ds = 0.0
@@ -440,38 +515,48 @@ class F1TenthMaplessEnv(_EnvBase):
 
         self.steps += 1
         obs = self._get_obs()
-        v_norm = (self.v - self.MIN_SPEED) / max(self._speed_span, 1e-6)
 
-        # 생존+진행이 짧은 충돌보다 항상 유리 (음수 누적 붕괴 방지)
+        # 레이싱 보상: 진행 위주 + 슬립/횡가속/조향급변 패널티 (alive 제거)
+        mu = self.st_params.mu
+        ay_lim = mu * G
+        slip = abs(self.beta)
+        ay_excess = max(abs(self.ay) - 0.85 * ay_lim, 0.0)
         reward = (
-            4.0 * max(sum_ds, 0.0)
-            + 0.2  # alive
-            + 0.15 * max(last_hcos, 0.0)
-            + 0.25 * v_norm * max(last_hcos, 0.0)
-            - 0.1 * max(last_cte - 0.7, 0.0)
-            - 0.4 * max(-sum_ds, 0.0)
+            5.0 * max(sum_ds, 0.0)
+            - 0.8 * max(-sum_ds, 0.0)
+            - 0.05 * steer_rate
+            - 0.5 * max(slip - 0.05, 0.0)
+            - 0.02 * ay_excess
+            - 0.1 * max(last_cte - 0.6, 0.0)
         )
-        reward = float(np.clip(reward, -2.0, 10.0))
+        reward = float(np.clip(reward, -3.0, 12.0))
         if collided:
             reward = -10.0
         if self.lap_completed:
             reward += 30.0
 
-        # 충돌만 terminate. 랩은 truncate (bootstrap 유지)
-        terminated = collided
+        # 역주행 종료
+        reverse = last_hcos < -0.25 and sum_ds < 0.0
+        terminated = bool(collided or reverse)
         truncated = self.lap_completed or self.steps >= self.MAX_STEPS
         info = {
             "collided": collided,
+            "reversed": reverse,
             "lap_completed": self.lap_completed,
-            "lap_time": self.phys_steps * DT if self.lap_completed else None,
+            "lap_time": self.phys_steps * PHYS_DT if self.lap_completed else None,
             "progress": float(self._s_travel / max(self.cl_loop, 1e-6)),
             "s_travel": self._s_travel,
             "speed": self.v,
+            "slip_angle": self.beta,
+            "yaw_rate": self.yaw_rate,
+            "ay": self.ay,
+            "mu": mu,
             "steering_angle": self.last_steer,
             "pos": np.array([self.x, self.y], dtype=np.float32),
             "theta": self.theta,
             "track_name": self.map_name,
-            "reward_mode": "privileged_progress_v4",
+            "reward_mode": "privileged_progress_st_v1",
+            "physics": self.physics,
             "ctrl_hz": 1.0 / self.dt_ctrl,
         }
         return (obs, reward, terminated, truncated, info) if _HAS_GYM else (

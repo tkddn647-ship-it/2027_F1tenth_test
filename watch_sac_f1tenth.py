@@ -78,7 +78,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-sec", type=float, default=180.0)
     parser.add_argument("--min-speed", type=float, default=2.0)
-    parser.add_argument("--max-speed", type=float, default=3.5)
+    parser.add_argument("--max-speed", type=float, default=7.0)
     parser.add_argument("--max-steer", type=float, default=0.30)
     parser.add_argument("--tag", type=str, default=None)
     parser.add_argument("--out-dir", type=str, default="watch_out_race")
