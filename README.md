@@ -182,6 +182,91 @@ python watch_sac_f1tenth.py --model connectome_sac_f1tenth_Spielberg_80k.zip `
 
 ---
 
+## ST Physical AI A/B — plain vs connectome (~80k best)
+
+동일 env: Spielberg · ST · \(v\in[2,7]\) · 조향 ±0.3735 · \(\mu\approx0.61\) · \(a_{lat}=6\).
+
+| 모델 | 체크포인트 |
+|------|------------|
+| plain | `runs/plain_Spielberg/best/best_model.zip` |
+| connectome | `connectome_sac_f1tenth_Spielberg_st27_best.zip` (≈60–80k best) |
+
+재현:
+
+```powershell
+python compare_st_ab.py
+# → docs/figures/st27_plain_vs_connectome.json
+# → docs/figures/sac_st27_{plain,conn}_best_Spielberg.gif (+ traj PNG)
+```
+
+### 주행 비교 (deterministic)
+
+**랜덤 스폰 seed 0–11**
+
+| | plain | connectome |
+|--|------:|-----------:|
+| 랩 | 0/12 | 0/12 |
+| 평균 progress | 0.09 | **0.16** |
+| 최대 progress | 0.20 | **0.78** (seed7) |
+| crash / reverse | 8 / 4 | 5 / 7 |
+| 평균 생존 t | 10.1 s | **15.1 s** |
+| slip_max 평균 | 0.20 | 0.24 |
+
+**정렬 출발 (CL 접선, idx=10) — 공정 비교**
+
+| | plain | connectome |
+|--|------:|-----------:|
+| 결과 | **93%에서 crash** | **랩 완주** (~53 s) |
+| progress | 0.93 | **0.98** |
+| v_mean / v_max | 5.98 / 6.97 | **6.40 / 6.91** |
+| slip_mean / max | 0.053 / 0.66 | 0.059 / 0.62 |
+| ay_mean | 3.61 | **2.58** (더 낮음) |
+
+| plain | connectome |
+|-------|------------|
+| ![](docs/figures/sac_st27_plain_best_Spielberg.gif) | ![](docs/figures/sac_st27_conn_best_Spielberg.gif) |
+| ![](docs/figures/sac_st27_plain_best_Spielberg_traj.png) | ![](docs/figures/sac_st27_conn_best_Spielberg_traj.png) |
+
+**해석:** 스폰이 엉망이면 둘 다 자주 죽음(역주행 terminate 포함).  
+**헤딩만 맞추면** 이 시점에서는 connectome best가 랩을 끝까지 가져가고, plain은 거의 다 와서 벽에 붙는다.  
+속도는 둘 다 ~7 근처까지 쓰지만, 성공 랩에서 connectome의 평균 \(a_y\)가 더 낮아 **고속 유지 + 횡가속 폭주가 덜한** 쪽에 가깝다.
+
+### 레이어 활성화 — 어디가 유리한가
+
+| | plain GIF | connectome GIF |
+|--|-----------|----------------|
+| 파일 | `policy_layers_activation_st_plain.gif` | `policy_layers_activation_st_connectome.gif` |
+| 보는 것 | Actor **h1/h2 ReLU** + slip/ay/v | Encoder \(z\) · **Connectome \(\|h\|\)/DN** · fuse |
+
+<p align="center">
+  <img src="docs/figures/policy_layers_activation_st_plain.gif" alt="ST plain layers" width="48%"/>
+  <img src="docs/figures/policy_layers_activation_st_connectome.gif" alt="ST connectome layers" width="48%"/>
+</p>
+
+| 상황 | 더 유리해 보이는 쪽 | 이유 |
+|------|---------------------|------|
+| **코너 진입·장면 급변** | **connectome** | \(z\) 변화 뒤 \(\|h\|\)/DN이 시간에 걸쳐 쌓임 → 5프레임 스택만 있는 plain보다 **짧은 시간 맥락**을 명시적으로 유지 |
+| **직진·단순 벽 회피** | **plain도 충분** | h1/h2가 LiDAR 패턴에 바로 반응; 커넥톰 이득이 작음 |
+| **랩 마무리(정렬 스폰)** | **connectome (이번 best)** | 동일 출발에서 완주 vs plain 93% crash |
+| **학습 벽시계 / 디버그** | **plain** | CPU fps ~3×, 구조 단순 |
+| **슬립·\(a_y\) 모니터링** | 둘 다 | GIF 제목줄 `slip`/`ay` — **물리 자체는 공유 ST** |
+
+한 줄: **Physical AI 물리에서는 “메모리가 필요할 때” connectome이 유리하고, 단순 회피·빠른 실험은 plain이 유리.**  
+본선 스토리용으로 connectome ST를 이어 학습 중(`…_st27.zip`, 200k 목표). plain은 베이스라인으로 유지.
+
+```powershell
+# 레이어 GIF 재생성
+python viz_policy_layers_plain_gif.py --model runs/plain_Spielberg/best/best_model.zip `
+  --physics st --min-speed 2 --max-speed 7 --max-steer 0.3735 --start-idx 10 `
+  --out docs/figures/policy_layers_activation_st_plain.gif
+
+python viz_policy_layers_gif.py --model connectome_sac_f1tenth_Spielberg_st27_best.zip `
+  --use-cache --physics st --min-speed 2 --max-speed 7 --max-steer 0.3735 --start-idx 10 `
+  --out docs/figures/policy_layers_activation_st_connectome.gif
+```
+
+---
+
 ## 2. 모듈 개념 설명 (초심자용)
 
 ### 2.1 왜 “인코더”가 필요한가?
@@ -487,10 +572,12 @@ python train_sac_connectome.py --use-cache --map Spielberg --timesteps 200000 --
 | `connectome_rnn.py` | leaky RNN (CUDA dense / CPU sparse) |
 | `train_sac_plain.py` / `train_sac_connectome.py` | 학습 (`--physics`, `[2,7]`, steer 0.3735) |
 | `watch_sac_f1tenth.py` | 주행 GIF + traj |
-| `viz_policy_layers.py` / `_gif.py` | connectome 활성화 |
-| `viz_policy_layers_plain_gif.py` | **ST plain** h1/h2 + slip/ay GIF |
-| `Roboracer-2026-main/` | 실차 ROS2·제원·Cartographer 맵 |
-| `maps/ifac_roboracer*` | IFAC 맵·센터라인 |
+| `compare_st_ab.py` | ST plain vs connectome 시드/정렬 A/B + GIF |
+| `viz_policy_layers_plain_gif.py` | ST plain h1/h2 + slip/ay GIF |
+| `viz_policy_layers_gif.py` | connectome \(z\)/\(h\)/DN GIF |
+| `docs/figures/st27_plain_vs_connectome.json` | A/B 수치 요약 |
+| `docs/figures/sac_st27_*` | ST A/B 주행 GIF·궤적 |
+| `docs/figures/policy_layers_activation_st_*.gif` | ST 레이어 활성화 |
 
 ---
 
