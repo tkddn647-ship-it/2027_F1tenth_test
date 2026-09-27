@@ -1,0 +1,166 @@
+{
+  "conn": {
+    "Spielberg": {
+      "t": 54.5,
+      "lap": true,
+      "crash": false,
+      "rev": false,
+      "prog": 0.9803,
+      "v_mean": 6.236
+    },
+    "Silverstone": {
+      "t": 53.4,
+      "lap": false,
+      "crash": true,
+      "rev": false,
+      "prog": 0.6757,
+      "v_mean": 5.83
+    },
+    "Monza": {
+      "t": 13.5,
+      "lap": false,
+      "crash": true,
+      "rev": false,
+      "prog": 0.1569,
+      "v_mean": 5.185
+    },
+    "Spa": {
+      "t": 30.8,
+      "lap": false,
+      "crash": true,
+      "rev": false,
+      "prog": 0.3356,
+      "v_mean": 6.081
+    },
+    "Catalunya": {
+      "t": 37.0,
+      "lap": false,
+      "crash": true,
+      "rev": false,
+      "prog": 0.5394,
+      "v_mean": 6.248
+    },
+    "Budapest": {
+      "t": 67.2,
+      "lap": true,
+      "crash": false,
+      "rev": false,
+      "prog": 0.9806,
+      "v_mean": 5.983
+    },
+    "BrandsHatch": {
+      "t": 43.7,
+      "lap": false,
+      "crash": true,
+      "rev": false,
+      "prog": 0.7643,
+      "v_mean": 6.395
+    },
+    "Austin": {
+      "t": 7.6,
+      "lap": false,
+      "crash": true,
+      "rev": false,
+      "prog": 0.1071,
+      "v_mean": 6.025
+    },
+    "ajou": {
+      "t": 8.5,
+      "lap": false,
+      "crash": false,
+      "rev": true,
+      "prog": 0.8005,
+      "v_mean": 4.807
+    },
+    "ifac": {
+      "t": 3.9,
+      "lap": false,
+      "crash": true,
+      "rev": false,
+      "prog": 0.2657,
+      "v_mean": 3.699
+    }
+  },
+  "plain": {
+    "Spielberg": {
+      "t": 54.1,
+      "lap": false,
+      "crash": true,
+      "rev": false,
+      "prog": 0.934,
+      "v_mean": 5.977
+    },
+    "Silverstone": {
+      "t": 13.5,
+      "lap": false,
+      "crash": true,
+      "rev": false,
+      "prog": 0.1605,
+      "v_mean": 5.556
+    },
+    "Monza": {
+      "t": 10.0,
+      "lap": false,
+      "crash": true,
+      "rev": false,
+      "prog": 0.1466,
+      "v_mean": 6.586
+    },
+    "Spa": {
+      "t": 3.9,
+      "lap": false,
+      "crash": true,
+      "rev": false,
+      "prog": 0.0414,
+      "v_mean": 5.975
+    },
+    "Catalunya": {
+      "t": 49.8,
+      "lap": false,
+      "crash": true,
+      "rev": false,
+      "prog": 0.734,
+      "v_mean": 6.18
+    },
+    "Budapest": {
+      "t": 65.8,
+      "lap": true,
+      "crash": false,
+      "rev": false,
+      "prog": 0.9806,
+      "v_mean": 5.998
+    },
+    "BrandsHatch": {
+      "t": 57.9,
+      "lap": true,
+      "crash": false,
+      "rev": false,
+      "prog": 0.9821,
+      "v_mean": 6.006
+    },
+    "Austin": {
+      "t": 7.1,
+      "lap": false,
+      "crash": true,
+      "rev": false,
+      "prog": 0.1035,
+      "v_mean": 6.33
+    },
+    "ajou": {
+      "t": 2.0,
+      "lap": false,
+      "crash": true,
+      "rev": false,
+      "prog": 0.2342,
+      "v_mean": 5.426
+    },
+    "ifac": {
+      "t": 1.0,
+      "lap": false,
+      "crash": true,
+      "rev": false,
+      "prog": 0.061,
+      "v_mean": 4.304
+    }
+  }
+}
