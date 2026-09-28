@@ -44,7 +44,9 @@ def _has_tb() -> bool:
 class LapEvalCallback(BaseCallback):
     """결정적 정책으로 고정 스폰에서 주행 → 진행률(랩 단위)·랩타임·충돌률 기록.
 
-    점수 = 평균 진행률(eval 시간 안에 몇 바퀴 갔나). 빠르고 안 죽을수록 높다.
+    점수 = 평균 '라인 기준 전진 속도' [m/s] = 진행 거리 / 에피소드 시간.
+    충돌하면 거기서 멈추므로 빠르고 안 죽을수록 높다. 맵 길이가 달라도 비교 가능.
+    이어 학습(--resume) 시 best.json 에서 이전 최고 점수를 읽어 덮어쓰기를 막는다.
     """
 
     def __init__(self, eval_maps, cfg: EnvConfig, save_dir: Path, eval_freq: int,
@@ -54,12 +56,16 @@ class LapEvalCallback(BaseCallback):
                                     sensor_noise=True, randomize=False)
         self.maps = [t.name for t in self.env.tracks]
         self.save_dir, self.eval_freq, self.n_spawns = save_dir, eval_freq, n_spawns
+        self.best_file = save_dir / "best.json"
         self.best = -np.inf
+        if self.best_file.exists():
+            self.best = float(json.loads(self.best_file.read_text())["score"])
         self.last_eval = 0
         self.csv = save_dir / "eval.csv"
-        with self.csv.open("w", newline="") as f:
-            csv.writer(f).writerow(["timesteps", "map", "spawn", "progress", "laps",
-                                    "best_lap", "collided", "v_mean", "sim_t"])
+        if not self.csv.exists():
+            with self.csv.open("w", newline="") as f:
+                csv.writer(f).writerow(["timesteps", "map", "spawn", "progress", "laps",
+                                        "best_lap", "collided", "v_mean", "sim_t", "score_mps"])
 
     def _run(self, m: str, k: int) -> dict:
         line_len = next(t for t in self.env.tracks if t.name == m).line.length
@@ -73,6 +79,7 @@ class LapEvalCallback(BaseCallback):
             if term or trunc:
                 break
         return dict(progress=info["progress"], laps=info["laps"],
+                    score=info["progress"] * line_len / self.env.cfg.max_episode_s,
                     best_lap=min(info["lap_times"]) if info["lap_times"] else np.nan,
                     collided=info["collided"], v_mean=float(np.mean(vs)), sim_t=info["t"])
 
@@ -80,30 +87,54 @@ class LapEvalCallback(BaseCallback):
         if self.num_timesteps - self.last_eval < self.eval_freq:
             return True
         self.last_eval = self.num_timesteps
-        rows, prog = [], []
+        rows, scores = [], []
         for m in self.maps:
             for k in range(self.n_spawns):
                 r = self._run(m, k)
                 rows.append([self.num_timesteps, m, k, r["progress"], r["laps"], r["best_lap"],
-                             int(r["collided"]), r["v_mean"], r["sim_t"]])
-                prog.append(r["progress"])
+                             int(r["collided"]), r["v_mean"], r["sim_t"], r["score"]])
+                scores.append(r["score"])
                 self.logger.record(f"eval/{m}_progress_{k}", r["progress"])
         with self.csv.open("a", newline="") as f:
             csv.writer(f).writerows(rows)
-        score = float(np.mean(prog))
+        score = float(np.mean(scores))
         crash = float(np.mean([r[6] for r in rows]))
         laps = [r[5] for r in rows if not np.isnan(r[5])]
-        self.logger.record("eval/progress_mean", score)
+        self.logger.record("eval/score_mps", score)
         self.logger.record("eval/crash_rate", crash)
         if laps:
             self.logger.record("eval/best_lap_s", float(np.min(laps)))
-        print(f"[eval] t={self.num_timesteps} progress={score:.3f} crash={crash:.2f} "
-              f"best_lap={np.min(laps) if laps else '-'}")
+        per_map = "  ".join(f"{m}: 진행 {np.mean([r[3] for r in rows if r[1] == m]):.2f}바퀴"
+                            for m in self.maps)
+        print(f"[eval] t={self.num_timesteps:,} 점수={score:.2f} m/s  충돌률={crash:.2f}  "
+              f"최고랩={np.min(laps) if laps else '-'}  | {per_map}", flush=True)
         if score > self.best:
             self.best = score
             self.model.save(str(self.save_dir / "best_model"))
-            print(f"[eval] new best → {self.save_dir / 'best_model.zip'}")
+            self.best_file.write_text(json.dumps({"score": score, "timesteps": int(self.num_timesteps)}))
+            print(f"[eval] new best → {self.save_dir / 'best_model.zip'}", flush=True)
         return True
+
+
+class TimeLimitCallback(BaseCallback):
+    """지정 시간이 지나면 학습을 멈추고 저장 (코랩 세션 끊기기 전에 안전하게 종료)."""
+
+    def __init__(self, minutes: float):
+        super().__init__()
+        self.deadline = time.time() + minutes * 60 if minutes > 0 else None
+
+    def _on_step(self) -> bool:
+        if self.deadline and time.time() > self.deadline:
+            print("[train] 시간 제한 도달 → 저장 후 종료", flush=True)
+            return False
+        return True
+
+
+def _find_resume(save_dir: Path) -> Path | None:
+    """save_dir 안에서 가장 최근 모델(last_model 또는 최신 체크포인트)을 찾는다."""
+    cands = list((save_dir / "checkpoints").glob("*.zip")) + [save_dir / "last_model.zip"]
+    cands = [c for c in cands if c.exists()]
+    return max(cands, key=lambda c: c.stat().st_mtime) if cands else None
 
 
 def main():
@@ -129,7 +160,8 @@ def main():
     p.add_argument("--eval-freq", type=int, default=50_000)
     p.add_argument("--ckpt-freq", type=int, default=200_000)
     p.add_argument("--save-dir", default=None)
-    p.add_argument("--resume", default=None, help="이어 학습할 zip")
+    p.add_argument("--resume", default=None, help="이어 학습할 zip, 또는 'auto' (save-dir 안 최신 모델)")
+    p.add_argument("--time-limit-min", type=float, default=0, help="이 시간(분) 뒤 저장하고 종료 (0=제한 없음)")
     args = p.parse_args()
 
     device = args.device
@@ -161,8 +193,15 @@ def main():
         net_arch=dict(pi=net, qf=net),
     )
 
-    if args.resume:
-        model = SAC.load(args.resume, env=env, device=device)
+    resume = args.resume
+    if resume == "auto":
+        found = _find_resume(save_dir)
+        resume = str(found) if found else None
+        print(f"[train] resume auto → {resume or '없음, 새로 시작'}")
+    if resume:
+        model = SAC.load(resume, env=env, device=device)
+        # 리플레이 버퍼는 저장하지 않으므로 5천 스텝(랜덤 행동)을 다시 모은 뒤 학습 재개
+        model.learning_starts = model.num_timesteps + min(args.learning_starts, 5_000)
         reset_ts = False
     else:
         model = SAC(
@@ -185,6 +224,7 @@ def main():
         LapEvalCallback(eval_maps, cfg, save_dir, args.eval_freq),
         CheckpointCallback(max(args.ckpt_freq // args.n_envs, 1), str(save_dir / "checkpoints"),
                            name_prefix="sac"),
+        TimeLimitCallback(args.time_limit_min),
     ])
     try:
         model.learn(total_timesteps=args.timesteps, callback=cbs, reset_num_timesteps=reset_ts)

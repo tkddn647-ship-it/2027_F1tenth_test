@@ -849,6 +849,13 @@ critic: [192 ; 32 ; p 24 ; a 2] = 250 → 256 → 256 → Q
 | `mapless40/tests.py` | numpy 테스트 + (torch 있으면) 정책·커넥톰 테스트 |
 | `mapless40/viz_encoder.py` | CNN 입력(1D 스캔 행렬 / BEV 이미지)과 층별 출력 시각화, numpy 만으로 동작 |
 
+### 12.0 노트북이 없으면: 코랩에서 학습
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tkddn647-ship-it/2027_F1tenth_test/blob/feat/mapless40-asym-sac/mapless40/colab_train.ipynb)
+
+`mapless40/colab_train.ipynb` — 무료 T4 GPU, 체크포인트는 구글 드라이브에 저장, 세션이 끊기면 `--resume auto` 로 이어 학습.
+테스트 → 기준선 → 학습 → 학습 곡선 → 평가 → CNN 시각화 → Jetson 용 파일 다운로드까지 셀 순서대로.
+
 ### 12.1 순서
 
 ```powershell
