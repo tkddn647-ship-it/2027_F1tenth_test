@@ -11,7 +11,7 @@ LiDAR 인코더 두 종류 (--encoder):
   conv1d : 프레임마다 Conv1d×3 → 48, 4장 concat → 192          (range view, 기준선)
   bev    : IMU·속도로 4프레임을 현재 차 기준에 정렬해 150×150 격자에 찍고
            (프레임별 점유 4ch + 최신 프레임 빈공간 1ch) → Conv2d×4 → 192
-  both   : conv1d 192 ‖ bev 192 → 384  (기본값, 장애물 대응)
+  both   : conv1d 192 ‖ bev 192 → 384  (코랩 T4 에선 conv1d 대비 약 10배 느림)
 
 배포되는 건 actor 뿐 → priv 는 actor 에 절대 들어가지 않는다 (make_actor 참고).
 """

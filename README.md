@@ -856,7 +856,8 @@ critic: [192 ; 32 ; p 24 ; a 2] = 250 → 256 → 256 → Q
 `mapless40/colab_train.ipynb` — 무료 T4 GPU, 체크포인트는 구글 드라이브에 저장, 세션이 끊기면 `--resume auto` 로 이어 학습.
 테스트 → 기준선 → 학습 → 학습 곡선 → 평가 → CNN 시각화 → Jetson 용 파일 다운로드까지 셀 순서대로.
 
-> **인코더 기본값 = `both`:** 1D CNN(거리 배열 4×1125 → 192) ‖ BEV 2D CNN(x,y 격자 5×150×150 → 192) → 384 → MLP.
+> **인코더 기본값 = `conv1d`:** 1D CNN(거리 배열 4×1125 → 192) → MLP. `--encoder both`(1D ‖ BEV 2D CNN 5×150×150 → 384)와 `bev` 도 그대로 있지만
+> 2D CNN 이 붙으면 코랩 T4 에서 느려서(both: 업데이트 중 약 85 steps/s, 100만 스텝 3시간+) 노트북 확보 후 쓴다.
 > **장애물:** 학습 에피소드 70%에 원통 장애물 1~3개(반지름 0.12~0.3 m, 한쪽 통과 폭 ≥ 0.8 m). LiDAR 에 찍히고 부딪히면 충돌.
 > critic 은 앞 10 m 안 장애물 위치를 privileged 로 본다 (priv 27). `evaluate --obstacles N` 으로 평가.
 >
