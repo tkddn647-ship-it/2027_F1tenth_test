@@ -636,9 +636,9 @@ A. 다음 스테이지로 적합. 지금은 Gym ST로 랩 안정화가 우선.
 
 ---
 
-## 11. 다음 설계 — 40 Hz · 레이싱라인 Asymmetric SAC (계획)
+## 11. 다음 설계 — 40 Hz · 레이싱라인 Asymmetric SAC
 
-> **상태: 설계안 (미구현).** 목표는 localization 없는 **mapless end-to-end** 주행.
+> **상태: 1차 구현 완료 → 코드·사용법은 [§12](#12-mapless40--40-hz-asymmetric-sac-테스트-버전).** 목표는 localization 없는 **mapless end-to-end** 주행.
 > 레이싱라인은 **보상·critic(학습 전용)** 에만 쓰고, 배포되는 actor 입력은 LiDAR + 자기상태뿐이다.
 > 모방학습이 아닌 **순수 RL**: 정답 행동을 따라 하지 않고, critic만 privileged 정보를 본다.
 
@@ -648,7 +648,7 @@ A. 다음 스테이지로 적합. 지금은 Gym ST로 랩 안정화가 우선.
 |--|--|--|
 | 제어 주기 | frame_skip 4 → **10 Hz** | frame_skip 1 → **40 Hz** (LiDAR 주기) |
 | 히스토리 | 0.1 s 간격 5장, 지연 0 | 스캔 **n-4…n-1** 4장 → 명령 $a_n$ (1틱 지연) |
-| 관측 | LiDAR + yaw | LiDAR + **속도 + yaw + 직전 명령** |
+| 관측 | LiDAR 135빔 + yaw | LiDAR **1125빔(0.24°, 15 m)** + **속도 + yaw + 직전 명령 + Δt** |
 | 시간 결합 | `z.mean(dim=1)` (순서 소실) | **concat** (순서 유지) 또는 GRU/커넥톰 |
 | 보상 기준 | 센터라인 progress + CTE 벌점 | **레이싱라인** progress + 횡오차 + 목표속도 |
 | critic 입력 | actor와 동일 | actor 입력 + **privileged** $p_n$ |
@@ -669,14 +669,15 @@ A. 다음 스테이지로 적합. 지금은 Gym ST로 랩 안정화가 우선.
 **Actor 관측 $o_n$** (실차에서 그대로 얻을 수 있음)
 
 ```math
-d_k=\mathrm{clip}\!\left(\frac{r_k}{40},0,1\right)\in\mathbb{R}^{135},\qquad k=n-4,\dots,n-1
+d_k=\mathrm{clip}\!\left(\frac{r_k}{15},0,1\right)\in\mathbb{R}^{1125},\qquad k=n-4,\dots,n-1
 ```
 
 ```math
-q_n=\Big[\tfrac{v_n}{v_{\max}},\ \mathrm{clip}\!\big(\tfrac{\omega_n}{3},-1,1\big),\ a_{n-1}\Big]\in\mathbb{R}^{4}
+q_n=\Big[\tfrac{\bar v_{n-4:n-1}}{7},\ \mathrm{clip}\!\big(\tfrac{\bar\omega_{n-4:n-1}}{3}\big),\ \tfrac{\omega_{\text{latest}}}{3},\ a_{n-2},\ a_{n-1},\ \tfrac{\Delta t_{n-4:n-1}-0.025}{0.025}\Big]\in\mathbb{R}^{17}
 ```
 
-$v_n$: 바퀴속도(VESC), $\omega_n$: yaw rate(IMU), $a_{n-1}$: 직전 명령 2개.
+LPX-T1 @ 40 Hz: 60 kHz / 40 Hz = 1500점/회전 → 0.24° → 270° 안 1125빔. 반사율 10% 한계 15 m 에서 자르고, 같은 격자칸에 여러 빔이 오면 **최소값**.
+$\bar v$: 바퀴속도(VESC 50 Hz) 구간 평균, $\bar\omega$: yaw rate(IMU 100 Hz) 구간 평균, $a$: 직전 명령 (δ, v_cmd) 2개, $\Delta t$: 스캔 간격.
 
 **Critic 추가 입력 $p_n$** (시뮬 전용 privileged)
 
@@ -693,7 +694,8 @@ p_n=\Big[e_y,\ e_\psi,\ v_n-v_{\mathrm{ref}}(s_n),\ \beta,\ \{\kappa(s_n+j\Delta
 | $\Delta, K$ | 예: 1 m, 10 → $p_n\in\mathbb{R}^{24}$ |
 
 > 레이싱라인: `f1tenth_racetracks/<Track>/<Track>_raceline.csv` (`;` 구분, `s,x,y,ψ,κ,vx,ax`).
-> `vx`는 차량 기준이 다르므로 `speed_profile.py`로 $a_{lat}=6$, **실측 감속률**에 맞춰 다시 계산.
+> 이 라인은 점 차량 기준이라 벽에서 0.1~0.3 m 까지 붙는다 → 거리장 기울기로 **벽에서 0.45 m 이상** 밀어낸 뒤 사용.
+> `vx`는 쓰지 않고 $a_{lat}=5$, **타력 감속 모델**(능동 제동 없음)로 다시 계산.
 
 ### 11.3 Actor (배포 네트워크)
 
@@ -701,14 +703,16 @@ p_n=\Big[e_y,\ e_\psi,\ v_n-v_{\mathrm{ref}}(s_n),\ \beta,\ \{\kappa(s_n+j\Delta
 
 ```math
 \begin{aligned}
-e^{(1)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{1\to32,\;k5,\;s2,\;p2}(d_k)\big) &&\in\mathbb{R}^{32\times68}\\
-e^{(2)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{32\to64,\;k5,\;s2,\;p2}(e^{(1)}_k)\big) &&\in\mathbb{R}^{64\times34}\\
-g_k &= \mathrm{flatten}\big(\mathrm{AvgPool}_{\to8}(e^{(2)}_k)\big) &&\in\mathbb{R}^{512}\\
+e^{(1)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{1\to32,\;k5,\;s2,\;p2}(d_k)\big) &&\in\mathbb{R}^{32\times563}\\
+e^{(2)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{32\to64,\;k5,\;s2,\;p2}(e^{(1)}_k)\big) &&\in\mathbb{R}^{64\times282}\\
+e^{(3)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{64\to64,\;k5,\;s2,\;p2}(e^{(2)}_k)\big) &&\in\mathbb{R}^{64\times141}\\
+g_k &= \mathrm{flatten}\big(\mathrm{AvgPool}_{\to8}(e^{(3)}_k)\big) &&\in\mathbb{R}^{512}\\
 z_k &= \mathrm{ReLU}(W_z g_k+b_z) &&\in\mathbb{R}^{48}
 \end{aligned}
 ```
 
-Conv 길이: $\lfloor (L+4-5)/2\rfloor+1$ → $135\to68\to34$.
+Conv 길이: $\lfloor (L+4-5)/2\rfloor+1$ → $1125\to563\to282\to141$.
+대안 인코더(`--encoder bev`): IMU·속도로 4프레임을 현재 차 기준에 정렬해 150×150 격자(10 cm)에 찍고 Conv2d×4 → 192.
 
 **② 시간 결합** (평균 금지, 순서 유지)
 
@@ -726,13 +730,13 @@ Z_n=\big[z_{n-4};\,z_{n-3};\,z_{n-2};\,z_{n-1}\big]\in\mathbb{R}^{192}
 \text{커넥톰:}\quad h_k=h_{k-1}+\frac{\Delta t}{\tau}\Big(-h_{k-1}+\tanh\big(h_{k-1}W_{\mathrm{eff}}+D(z_k)\big)\Big),\qquad W_{\mathrm{eff}}=A_{\mathrm{signed}}\odot\mathrm{scale}\odot M
 ```
 
-$A[\mathrm{pre},\mathrm{post}]$ 이므로 **전치 없이** $h\,W_{\mathrm{eff}}$ (현재 CUDA 경로 `h @ W_eff.t()`는 방향이 반대 — 수정 필요).
+$A[\mathrm{pre},\mathrm{post}]$ 이므로 **전치 없이** $h\,W_{\mathrm{eff}}$ (예전 CUDA 경로 `h @ W_eff.t()`는 방향이 반대였음 — `connectome_rnn.py` 수정 완료).
 $D(z_k)$: 입력 뉴런 위치에만 $W_{in}z_k$, 출력 $y=h_{n-1}[\mathrm{DN}]$.
 
 **③ 자기상태 인코더**
 
 ```math
-u_n=\mathrm{ReLU}(W_q q_n+b_q)\in\mathbb{R}^{32}
+u_n=\mathrm{ReLU}(W_q q_n+b_q)\in\mathbb{R}^{32},\qquad W_q\in\mathbb{R}^{32\times17}
 ```
 
 **④ Fuse**
@@ -763,7 +767,7 @@ f=\mathrm{ReLU}\Big(W_2\,\mathrm{ReLU}\big(W_1[Z_n;\,u_n]+b_1\big)+b_2\Big)\in\m
 \delta_{\mathrm{cmd}}=\tilde a_1\,\delta_{\max},\qquad v_{\mathrm{cmd}}=v_{\min}+\frac{\tilde a_2+1}{2}\,(v_{\max}-v_{\min})
 ```
 
-$\delta_{\max}=0.3735$ rad, $v\in[2,7]$ m/s.
+$\delta_{\max}=0.3735$ rad, $v\in[1.5,7]$ m/s.
 
 ### 11.4 Critic (학습 전용, $Q_1,Q_2$ + target)
 
@@ -811,20 +815,112 @@ y=r_n+\gamma(1-\mathrm{done})\Big[\min_{j=1,2}\bar Q_j(o_{n+1},p_{n+1},a')-\alph
 ### 11.7 차원 흐름
 
 ```text
-actor : 4×135 ─Conv×2·Pool·FC→ 4×48 ─concat→ 192 ┐
-        q(4) ─FC→ 32 ────────────────────────────┴→ 224 → 256 → 256 → (μ,σ)∈R² → tanh → (δ, v)
+actor : 4×1125 ─Conv×3·Pool·FC→ 4×48 ─concat→ 192 ┐
+        q(17) ─FC→ 32 ────────────────────────────┴→ 224 → 256 → 256 → (μ,σ)∈R² → tanh → (δ, v)
 
 critic: [192 ; 32 ; p 24 ; a 2] = 250 → 256 → 256 → Q
 ```
 
-### 11.8 구현 메모
+### 11.8 구현 메모 (→ §12 에서 반영됨)
 
-- 리플레이 버퍼에 $o_n$, $p_n$ 둘 다 저장 → obs를 `Dict{"obs", "priv"}`로.
-  SAC 기본값 `share_features_extractor=False`이므로 actor extractor는 `priv`를 버리고 critic extractor만 사용.
-- 스텝 단위 상수 ×4: `MAX_STEPS`, `REVERSE_GRACE_STEPS`, `REVERSE_STREAK`, eval/ckpt 주기.
-- 40 Hz 레이캐스트: 현재 순수 Python 약 18 ms/스캔 → EDT sphere-tracing + numba로 가속 필요.
-- sim2real: 실차 AUTO 속도 PI는 duty 하한 0(능동 제동 없음), duty rate 0.6/s → 실측 감속·조향 응답을 동역학에 반영.
-- 평가: 학습에 안 쓴 트랙에서 완주율 → 랩타임, 실차 FGM 대비.
+- 관측은 `Dict{"scan", "state", "priv"}`, `AsymSACPolicy`가 actor 추출기엔 priv 를 안 넣고 critic 추출기만 사용.
+- 시간 단위 상수는 초 단위로 정의 (에피소드 60 s, 역주행 1 s).
+- 40 Hz 레이캐스트: EDT sphere tracing (numpy 벡터화) → 1125빔 약 2.5 ms (예전 135빔 18.5 ms).
+- sim2real: 서보(dead time·1차 지연·각속도 제한), 구동(dead time·저크 제한·**능동 제동 없음, 타력 감속**), 스캔 지터·누락.
+- 평가: 학습에 안 쓴 트랙에서 진행률·랩타임, FGM(mapless) 기준선 대비.
+
+---
+
+## 12. mapless40 — 40 Hz asymmetric SAC (테스트 버전)
+
+§11 설계를 구현한 1차 버전. 기존 파일(§1–§10)은 그대로 두고 `mapless40/` 패키지로 분리했다.
+
+| 파일 | 역할 |
+|--|--|
+| `mapless40/config.py` | 모든 상수 (LiDAR·타이밍·액추에이터·보상). `[측정 필요]` 표시는 실차 식별 대상 |
+| `mapless40/obs_builder.py` | **sim·실차 공용** 전처리: 스캔 격자화(min-pooling), IMU/속도 구간 평균, state 17 |
+| `mapless40/raycast.py` | EDT sphere tracing LiDAR 시뮬 (1125빔 ≈ 2.5 ms) |
+| `mapless40/actuators.py` | 서보(dead time·1차 지연·각속도 제한), 구동(저크 제한·**능동 제동 없음**) |
+| `mapless40/raceline.py` | 레이싱라인 로드 → 벽에서 0.45 m 밀어내기 → 제원 기반 속도 프로파일, Frenet |
+| `mapless40/env.py` | `MaplessRaceEnv40` — 40 Hz, IMU 100 Hz·속도 50 Hz 샘플링, 스캔 지터·누락, 멀티맵 |
+| `mapless40/policy.py` | `AsymFeatures`(conv1d / bev) + `AsymSACPolicy`(critic 만 priv) + 배포용 actor |
+| `mapless40/train.py` · `evaluate.py` · `export.py` | 학습 · 평가/궤적 PNG · TorchScript/ONNX 내보내기 |
+| `mapless40/ros_node.py` | Jetson ROS2 노드 (`/scan` 콜백 = 제어 1회, 맵·인터넷 불필요) |
+| `mapless40/tests.py` | numpy 테스트 + (torch 있으면) 정책·커넥톰 테스트 |
+
+### 12.1 순서
+
+```powershell
+pip install -r requirements.txt          # scipy 추가됨
+
+# ① 테스트 (numpy 9개 + torch 3개)
+python -m mapless40.tests
+
+# ② 기준선 — 학습 전에 env 가 정상인지, RL 이 넘어야 할 기록 확인
+python -m mapless40.evaluate --baseline ftg --maps ifac,Spielberg,Budapest --laps 1   # mapless 고전
+python -m mapless40.evaluate --baseline pp  --maps ifac,Spielberg --laps 1            # privileged 참고
+
+# ③ 학습 (1D Conv 기준선)
+python -m mapless40.train --maps Spielberg,Silverstone,Monza,Catalunya --eval-maps Budapest `
+  --encoder conv1d --timesteps 2000000 --n-envs 8 --subproc --device cuda
+
+# ③' 비교 실험: BEV 2D CNN (나머지 동일)
+python -m mapless40.train ... --encoder bev
+
+# ④ 평가 (학습에 안 쓴 맵 포함, 궤적 PNG → eval_out/)
+python -m mapless40.evaluate --model runs/mapless40_conv1d_<시각>/best_model.zip --maps Budapest,ifac,Spielberg
+
+# ⑤ 내보내기 → Jetson 에 actor.ts.pt + actor_meta.json 두 파일만 복사
+python -m mapless40.export runs/mapless40_conv1d_<시각>/best_model.zip --onnx
+python -m mapless40.evaluate --model runs/mapless40_conv1d_<시각>/actor.ts.pt --maps ifac   # 배포 파일로 재확인
+```
+
+Jetson (ROS2, 레포 루트에서):
+
+```bash
+python3 -m mapless40.ros_node --ros-args -p model:=actor.ts.pt -p meta:=actor_meta.json \
+  -p max_speed:=2.0 -p mount_yaw:=0.0
+```
+
+- `/scan` 원본을 구독한다 (`scan_rate_adapter` 쓰지 말 것). e-stop·AEB 는 기존 노드 그대로.
+- 첫 시험은 `max_speed:=2.0` 으로 상한을 걸고, 로그의 `latency ms` 가 25 ms 보다 충분히 작은지 확인.
+
+### 12.2 이 환경에서 확인한 것 (numpy 부분)
+
+| 항목 | 결과 |
+|--|--|
+| LiDAR 시뮬 1125빔 | 2.5 ms/스캔, 1 cm 브루트포스 대비 오차 ≤ 3 cm |
+| env 1스텝 (25 ms 시뮬) | 약 3 ms → 실시간의 약 8배 |
+| FTG (mapless, 최신 스캔만) | ifac 19.3 s · Spielberg 102 s · Budapest 105 s 완주 |
+| Pure pursuit (privileged, 90% 속도) | ifac 17.0 s · Spielberg 63 s · Monza 83 s · Silverstone 90 s 완주 |
+| BEV 프레임 정렬 (IMU·속도 적분) | 실제 pose 대비 1.5 cm · 0.01° 이내 |
+
+torch / SB3 부분(`policy.py`, `train.py`, `export.py`)은 이 작업 환경에 torch 를 설치할 수 없어 **SB3 소스 기준으로 작성만** 했다.
+`python -m mapless40.tests` 가 actor 가 priv 를 안 보는지, critic 은 보는지, 짧은 학습 루프가 도는지를 확인하니 **먼저 이걸 돌릴 것**.
+
+### 12.3 구현하면서 발견한 것
+
+- **ST 모델의 μ**: 선형 타이어라 μ 는 코너링 강성 배율일 뿐 횡력 한계가 아니다. 기존 `STParams.roboracer()` 의 μ = a_lat/g ≈ 0.61 은
+  언더스티어만 키우고(5.7 m/s 에서 요레이트가 기구학의 68 %) 횡가속은 8 m/s² 까지 허용했다 → mapless40 은 식별값 μ = 1.05 + 별도 횡가속 캡 7 m/s².
+- **f1tenth_racetracks 레이싱라인**은 벽에서 0.1~0.3 m 까지 붙어 있어 차체(반폭 0.15, CG→앞 0.33)로는 그대로 따라가면 충돌 → 0.45 m 밀어냄.
+- **커넥톰 CUDA 경로 방향 버그** 수정 (`connectome_rnn.py`, 테스트 포함).
+
+### 12.4 실차 전에 측정할 값 (`config.py` 의 `[측정 필요]`)
+
+| 값 | 기본값 | 측정 방법 |
+|--|--|--|
+| 실제 빔 수 `n_beams` | 1125 | `/scan` 의 `len(ranges)`, `angle_increment` |
+| `mount_yaw` | 0 | 스캔 0° 가 정면인지 (`sensor_static_tf` 의 `lidar_yaw`) |
+| 서보 `servo_dead_time` / `servo_tau` / `servo_rate_max` | 10 ms / 40 ms / 5 rad/s | 조향 step 명령 → IMU 요레이트 응답 |
+| 타력 감속 `coast_decel_c0` / `c1` | 0.6 / 0.15 | 지면에서 목표속도를 내리는 step → VESC 속도 로그 |
+| `jerk_max` · `drive_dead_time` | 40 m/s³ · 20 ms | 목표속도 올리는 step |
+| `compute_latency` | 5 ms | 노드 로그 `latency ms` |
+
+값을 바꾸면 sim 과 `actor_meta.json` 이 같이 바뀌어야 하므로 **바꾼 뒤 다시 학습**한다.
+
+### 12.5 아직 없는 것
+
+스캔 1회전 동안의 왜곡(sweep) 시뮬, 상대차, 다음 스캔 예측 보조손실, 빔 토큰 attention 인코더, 커넥톰 인코더 연결.
 
 ---
 
