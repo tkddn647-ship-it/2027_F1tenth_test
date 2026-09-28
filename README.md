@@ -856,6 +856,9 @@ critic: [192 ; 32 ; p 24 ; a 2] = 250 → 256 → 256 → Q
 `mapless40/colab_train.ipynb` — 무료 T4 GPU, 체크포인트는 구글 드라이브에 저장, 세션이 끊기면 `--resume auto` 로 이어 학습.
 테스트 → 기준선 → 학습 → 학습 곡선 → 평가 → CNN 시각화 → Jetson 용 파일 다운로드까지 셀 순서대로.
 
+> **현재 기본값 = 간단 버전:** 속도 2~5 m/s, 기준 라인은 레이싱라인(센터라인만 있는 맵은 최소곡률 라인),
+> 모르는 값(서보·구동 지연, 가속·코너 한계)은 실차보다 불리한 쪽으로 잡음. ifac: 이론 11.0 s, pure pursuit 11.5 s, FTG 18.0 s.
+
 ### 12.1 순서
 
 ```powershell
@@ -927,10 +930,11 @@ torch / SB3 부분(`policy.py`, `train.py`, `export.py`)은 이 작업 환경에
 |--|--|--|
 | 실제 빔 수 `n_beams` | 1125 | `/scan` 의 `len(ranges)`, `angle_increment` |
 | `mount_yaw` | 0 | 스캔 0° 가 정면인지 (`sensor_static_tf` 의 `lidar_yaw`) |
-| 서보 `servo_dead_time` / `servo_tau` / `servo_rate_max` | 10 ms / 40 ms / 5 rad/s | 조향 step 명령 → IMU 요레이트 응답 |
+| 서보 `servo_dead_time` / `servo_tau` / `servo_rate_max` | 15 ms / 50 ms / 4 rad/s (보수적) | 조향 step 명령 → IMU 요레이트 응답 |
 | 타력 감속 `coast_decel_c0` / `c1` | 0.6 / 0.15 | 지면에서 목표속도를 내리는 step → VESC 속도 로그 |
-| `jerk_max` · `drive_dead_time` | 40 m/s³ · 20 ms | 목표속도 올리는 step |
-| `compute_latency` | 5 ms | 노드 로그 `latency ms` |
+| `accel_max` · `jerk_max` · `drive_dead_time` | 5 m/s² · 40 m/s³ · 30 ms (보수적) | 목표속도 올리는 step |
+| `compute_latency` | 10 ms (보수적) | 노드 로그 `latency ms` |
+| 코너 마찰 한계 `a_lat_cap` | 6 m/s² (보수적) | 원 선회 속도를 올리며 IMU 횡가속 |
 
 값을 바꾸면 sim 과 `actor_meta.json` 이 같이 바뀌어야 하므로 **바꾼 뒤 다시 학습**한다.
 

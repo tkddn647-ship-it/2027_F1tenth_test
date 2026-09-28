@@ -125,10 +125,16 @@ def test_env_spaces_and_latency():
         assert obs[k].shape == sp.shape and obs[k].dtype == sp.dtype, k
     env.randomize = False
     d0 = env.state[2]
-    # 첫 스텝: 명령은 compute_latency + servo dead time 뒤에야 조향이 움직이기 시작
+    # 명령은 compute_latency + servo dead time 뒤에야 조향이 움직이기 시작한다
+    delay = CFG.timing.compute_latency + CFG.act.servo_dead_time
+    n_wait = int(np.ceil((delay + 1e-9) / CFG.timing.dt_scan))
+    for _ in range(n_wait):
+        env.step(np.array([1.0, 0.0], np.float32))
+    if delay >= CFG.timing.dt_scan:
+        pass  # 지연이 한 틱 이상이면 첫 틱에는 안 움직이는 게 정상
     env.step(np.array([1.0, 0.0], np.float32))
-    assert env.state[2] > d0, "조향 명령이 한 틱 안에 반영되기 시작해야 함"
-    assert env.state[2] < CFG.act.steer_max * 0.6, "서보 지연/속도제한이 있어야 함"
+    assert env.state[2] > d0 + 1e-3, "지연 뒤에는 조향이 움직여야 함"
+    assert env.state[2] < CFG.act.steer_max * 0.9, "서보 지연/속도제한이 있어야 함"
 
 
 def test_env_ftg_completes_lap(max_s: float = 40.0):
