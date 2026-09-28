@@ -127,6 +127,21 @@ class TimeLimitCallback(BaseCallback):
         # 코랩 런타임이 끊기면 finally 의 last_model 저장이 안 돈다 → 주기적으로 덮어쓴다
         self.save_path, self.save_every = save_path, save_every_min * 60
         self._t_save = time.time()
+        # 시간 분해: rollout(env 스텝 + 행동 추론) vs 그 사이(= SAC 업데이트)
+        self._t_roll = self._t_end = None
+        self._acc_env = self._acc_upd = 0.0
+
+    def _on_rollout_start(self) -> None:
+        now = time.time()
+        if self._t_end is not None:
+            self._acc_upd += now - self._t_end
+        self._t_roll = now
+
+    def _on_rollout_end(self) -> None:
+        now = time.time()
+        if self._t_roll is not None:
+            self._acc_env += now - self._t_roll
+        self._t_end = now
 
     def _on_step(self) -> bool:
         now = time.time()
@@ -137,8 +152,11 @@ class TimeLimitCallback(BaseCallback):
             left = getattr(self.model, "_total_timesteps", 0) - self.num_timesteps
             eta = f", 남은 {left / max(rate, 1e-6) / 3600:.1f} h" if left > 0 else ""
             phase = "학습 중" if self.num_timesteps > self.model.learning_starts else "데이터 모으는 중(업데이트 전)"
+            tot = max(self._acc_env + self._acc_upd, 1e-9)
             print(f"[speed] 최근 1분 {rate:.0f} steps/s [{phase}, {self.model.device}] "
+                  f"env {100 * self._acc_env / tot:.0f}% / 업데이트 {100 * self._acc_upd / tot:.0f}% "
                   f"(step {self.num_timesteps:,}{eta})", flush=True)
+            self._acc_env = self._acc_upd = 0.0
             self._t, self._n = now, self.num_timesteps
         if self.save_path is not None and now - self._t_save >= self.save_every:
             self.model.save(str(self.save_path))
