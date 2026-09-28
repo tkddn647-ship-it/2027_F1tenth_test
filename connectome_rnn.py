@@ -154,10 +154,10 @@ if _HAS_TORCH:
             W_eff = self.effective_weight()
             use_dense = x.is_cuda or self.n <= 128
             if use_dense:
-                # (B,N) @ (N,N)^T  equivalent: h @ W_eff  if W_eff maps pre→post via W.T
-                W_t = W_eff.t()
+                # A[pre, post] 규약: post_i = Σ_pre h_pre · W[pre, i]  →  h @ W_eff  (전치 없음)
+                # (이전 코드 h @ W_eff.t() 는 post→pre 로 신호가 거꾸로 흘러 CPU sparse 경로와 달랐다)
                 for _ in range(n_steps):
-                    rec_input = h @ W_t
+                    rec_input = h @ W_eff
                     target = torch.tanh(rec_input + drive)
                     h = h + (self.dt / self.tau) * (-h + target)
             else:
