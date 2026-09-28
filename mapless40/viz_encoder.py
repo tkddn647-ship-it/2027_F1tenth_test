@@ -11,7 +11,7 @@ LiDAR CNN 인코더에 "들어가는 것"과 "나오는 것"을 그림으로 본
 학습 후 --model 로 다시 돌리면 같은 그림에서 무엇을 배웠는지 비교할 수 있다.
 
 산출물:
-  enc1d_<map>.png   1D Conv: 입력 4×1125 → Conv 32×563 → 64×282 → 64×141 → z 4×48
+  enc1d_<map>.png   1D Conv: 입력 4×1125 → Conv 16×375 → 32×125 → 64×63 → z 4×48
   bev_<map>.png     BEV: 입력 5채널(프레임 4 + 빈공간) → Conv2d 16·32·64·64 채널 → 192
   bev_<map>.gif     주행하면서 BEV 입력과 Conv 출력이 바뀌는 모습
 """
@@ -30,7 +30,7 @@ from .obs_builder import beam_angles
 
 
 # ------------------------------------------------------------------ numpy ops
-def conv1d(x, w, b, stride=2, pad=2):
+def conv1d(x, w, b, stride=2, pad=2):  # noqa: D401
     """x (C, L), w (O, C, K) → (O, L')."""
     C, L = x.shape
     O, _, K = w.shape
@@ -70,12 +70,22 @@ def _init(rng, shape):
 class Weights:
     def __init__(self, seed: int = 0, model_zip: str | None = None, n_beams: int = 1125):
         rng = np.random.default_rng(seed)
-        self.c1 = _init(rng, (32, 1, 5)); self.c2 = _init(rng, (64, 32, 5)); self.c3 = _init(rng, (64, 64, 5))
+        from .policy_spec import CONV1D_LAYERS
+        self.c1d_spec = CONV1D_LAYERS
+        c_in, L, ws = 1, n_beams, []
+        for c_out, k, s, p in CONV1D_LAYERS:
+            ws.append(_init(rng, (c_out, c_in, k)))
+            L = (L + 2 * p - k) // s + 1
+            c_in = c_out
+        self.c1, self.c2, self.c3 = ws
+        self.c1d_len = []
         L = n_beams
-        for _ in range(3):
-            L = (L + 4 - 5) // 2 + 1
-        self.pool_k = L // 8
-        self.fc1 = _init(rng, (48, 64 * 8))
+        for c_out, k, s, p in CONV1D_LAYERS:
+            L = (L + 2 * p - k) // s + 1
+            self.c1d_len.append((c_out, L))
+        self.pool_k = max(1, L // 8)
+        self.pool_n = (L - self.pool_k) // self.pool_k + 1      # nn.AvgPool1d(k, k) 출력 길이
+        self.fc1 = _init(rng, (48, c_in * self.pool_n))
         self.b1 = _init(rng, (16, 5, 3, 3)); self.b2 = _init(rng, (32, 16, 3, 3))
         self.b3 = _init(rng, (64, 32, 3, 3)); self.b4 = _init(rng, (64, 64, 3, 3))
         self.fcb = _init(rng, (192, 64 * 5 * 5))
@@ -110,12 +120,13 @@ class Weights:
 def enc1d(scan, W: Weights):
     """scan (4, N) → 층별 활성 (프레임별 리스트)."""
     acts = {"in": scan, "c1": [], "c2": [], "c3": [], "pool": [], "z": []}
+    (_, _, s1, p1), (_, _, s2, p2), (_, _, s3, p3) = W.c1d_spec
     for k in range(scan.shape[0]):
-        a1 = relu(conv1d(scan[k][None], *W.c1))
-        a2 = relu(conv1d(a1, *W.c2))
-        a3 = relu(conv1d(a2, *W.c3))
-        kk = W.pool_k
-        p = a3[:, :kk * 8].reshape(64, 8, kk).mean(-1)
+        a1 = relu(conv1d(scan[k][None], *W.c1, stride=s1, pad=p1))
+        a2 = relu(conv1d(a1, *W.c2, stride=s2, pad=p2))
+        a3 = relu(conv1d(a2, *W.c3, stride=s3, pad=p3))
+        kk, nn_ = W.pool_k, W.pool_n
+        p = a3[:, :kk * nn_].reshape(a3.shape[0], nn_, kk).mean(-1)
         z = relu(W.fc1[0] @ p.reshape(-1) + W.fc1[1])
         for n, v in (("c1", a1), ("c2", a2), ("c3", a3), ("pool", p), ("z", z)):
             acts[n].append(v)
@@ -259,8 +270,9 @@ def fig_1d(env, obs, W, out, trained):
     ax.imshow(obs["scan"].astype(np.float32), aspect="auto", cmap=CMAP + "_r", vmin=0, vmax=1, interpolation="nearest")
     _style(ax, "③ 입력 행렬 4 × 1125  (행 = 시간 n-4…n-1, 열 = 각도, 진할수록 가까움)")
 
-    for i, (key, shp, ttl) in enumerate([("c1", "32 × 563", "Conv1 출력"), ("c2", "64 × 282", "Conv2 출력"),
-                                         ("c3", "64 × 141", "Conv3 출력")]):
+    shp_ = [f"{c} × {L}" for c, L in W.c1d_len]
+    for i, (key, shp, ttl) in enumerate([("c1", shp_[0], "Conv1 출력"), ("c2", shp_[1], "Conv2 출력"),
+                                         ("c3", shp_[2], "Conv3 출력")]):
         ax = fig.add_subplot(gs[2, i])
         m = a[key][-1]
         ax.imshow(m / (m.max(1, keepdims=True) + 1e-9), aspect="auto", cmap=CMAP, interpolation="nearest")

@@ -30,19 +30,27 @@ from .config import PRIV_DIM, LidarSpec, NormSpec
 
 
 # --------------------------------------------------------------------------- 1D
+from .policy_spec import CONV1D_LAYERS  # (out_ch, kernel, stride, pad), viz_encoder 와 공유
+
+
 class ScanEncoder1D(nn.Module):
-    """(B, T, N) → (B, T·out_dim).  프레임마다 같은 가중치."""
+    """(B, T, N) → (B, T·out_dim).  프레임마다 같은 가중치.
+
+    1125 → 375 → 125 → 63.  예전 (32·64·64, stride 2·2·2, 1125→563→282→141) 은
+    학습 업데이트 1회에 약 130 GFLOP 라 코랩 T4 에서 15 steps/s 밖에 안 나왔다 → 연산 약 1/6.
+    첫 층 커널 7(빔 7개 = 1.7°)이 빔을 전부 덮으므로 0.24° 빔을 버리지 않는다.
+    """
 
     def __init__(self, n_beams: int, hist: int, out_dim: int = 48):
         super().__init__()
         self.hist, self.n_beams, self.out_dim = hist, n_beams, out_dim
-        self.conv = nn.Sequential(
-            nn.Conv1d(1, 32, 5, stride=2, padding=2), nn.ReLU(),
-            nn.Conv1d(32, 64, 5, stride=2, padding=2), nn.ReLU(),
-            nn.Conv1d(64, 64, 5, stride=2, padding=2), nn.ReLU(),
-        )
+        layers, c_in = [], 1
+        for c_out, k, s, p in CONV1D_LAYERS:
+            layers += [nn.Conv1d(c_in, c_out, k, stride=s, padding=p), nn.ReLU()]
+            c_in = c_out
+        self.conv = nn.Sequential(*layers)
         with torch.no_grad():
-            L = self.conv(torch.zeros(1, 1, n_beams)).shape[-1]     # 1125 → 141
+            L = self.conv(torch.zeros(1, 1, n_beams)).shape[-1]     # 1125 → 63
         k = max(1, L // 8)
         self.pool = nn.AvgPool1d(k, stride=k)                      # ONNX 친화 (adaptive 대신)
         with torch.no_grad():

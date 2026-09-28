@@ -703,15 +703,17 @@ p_n=\Big[e_y,\ e_\psi,\ v_n-v_{\mathrm{ref}}(s_n),\ \beta,\ \{\kappa(s_n+j\Delta
 
 ```math
 \begin{aligned}
-e^{(1)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{1\to32,\;k5,\;s2,\;p2}(d_k)\big) &&\in\mathbb{R}^{32\times563}\\
-e^{(2)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{32\to64,\;k5,\;s2,\;p2}(e^{(1)}_k)\big) &&\in\mathbb{R}^{64\times282}\\
-e^{(3)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{64\to64,\;k5,\;s2,\;p2}(e^{(2)}_k)\big) &&\in\mathbb{R}^{64\times141}\\
-g_k &= \mathrm{flatten}\big(\mathrm{AvgPool}_{\to8}(e^{(3)}_k)\big) &&\in\mathbb{R}^{512}\\
+e^{(1)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{1\to16,\;k7,\;s3,\;p3}(d_k)\big) &&\in\mathbb{R}^{16\times375}\\
+e^{(2)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{16\to32,\;k5,\;s3,\;p2}(e^{(1)}_k)\big) &&\in\mathbb{R}^{32\times125}\\
+e^{(3)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{32\to64,\;k5,\;s2,\;p2}(e^{(2)}_k)\big) &&\in\mathbb{R}^{64\times63}\\
+g_k &= \mathrm{flatten}\big(\mathrm{AvgPool}_{k7}(e^{(3)}_k)\big) &&\in\mathbb{R}^{576}\\
 z_k &= \mathrm{ReLU}(W_z g_k+b_z) &&\in\mathbb{R}^{48}
 \end{aligned}
 ```
 
-Conv 길이: $\lfloor (L+4-5)/2\rfloor+1$ → $1125\to563\to282\to141$.
+Conv 길이: $\lfloor (L+2p-k)/s\rfloor+1$ → $1125\to375\to125\to63$ (AvgPool k7 → 9칸).
+첫 층 커널 7 이 빔 7개(1.7°)를 덮으며 3칸씩 이동하므로 모든 빔이 입력에 쓰인다.
+예전 구성(32·64·64 채널, stride 2, $1125\to563\to282\to141$)은 학습 업데이트 1회에 약 130 GFLOP 라 코랩 T4 에서 15 steps/s → 연산 약 1/6 로 줄임.
 대안 인코더(`--encoder bev`): IMU·속도로 4프레임을 현재 차 기준에 정렬해 150×150 격자(10 cm)에 찍고 Conv2d×4 → 192.
 
 **② 시간 결합** (평균 금지, 순서 유지)
