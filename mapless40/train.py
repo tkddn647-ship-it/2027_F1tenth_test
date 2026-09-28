@@ -136,7 +136,9 @@ class TimeLimitCallback(BaseCallback):
             rate = (self.num_timesteps - self._n) / (now - self._t)
             left = getattr(self.model, "_total_timesteps", 0) - self.num_timesteps
             eta = f", 남은 {left / max(rate, 1e-6) / 3600:.1f} h" if left > 0 else ""
-            print(f"[speed] 최근 1분 {rate:.0f} steps/s (step {self.num_timesteps:,}{eta})", flush=True)
+            phase = "학습 중" if self.num_timesteps > self.model.learning_starts else "데이터 모으는 중(업데이트 전)"
+            print(f"[speed] 최근 1분 {rate:.0f} steps/s [{phase}, {self.model.device}] "
+                  f"(step {self.num_timesteps:,}{eta})", flush=True)
             self._t, self._n = now, self.num_timesteps
         if self.save_path is not None and now - self._t_save >= self.save_every:
             self.model.save(str(self.save_path))
@@ -236,7 +238,12 @@ def main():
 
     n_act = sum(p.numel() for p in model.policy.actor.parameters())
     n_crit = sum(p.numel() for p in model.policy.critic.parameters())
-    print(f"[train] encoder={args.encoder} maps={maps} eval={eval_maps} device={device} "
+    real_dev = str(model.device)
+    if device == "cuda" and not real_dev.startswith("cuda"):
+        print("!" * 70 + "\n[train] 경고: GPU 없음 → CPU 로 학습 중 (매우 느림). 코랩 GPU 할당량 소진 가능성.\n"
+              "        런타임 → 런타임 유형 변경 → T4 GPU 확인, 안 되면 할당량이 풀린 뒤 다시.\n" + "!" * 70, flush=True)
+    gpu = torch.cuda.get_device_name(0) if real_dev.startswith("cuda") else "-"
+    print(f"[train] encoder={args.encoder} maps={maps} eval={eval_maps} device={real_dev} ({gpu}) "
           f"gamma={args.gamma:.4f} actor_params={n_act:,} critic_params={n_crit:,}")
 
     cbs = CallbackList([
