@@ -120,10 +120,13 @@ class LapEvalCallback(BaseCallback):
 class TimeLimitCallback(BaseCallback):
     """지정 시간이 지나면 학습을 멈추고 저장 (코랩 세션 끊기기 전에 안전하게 종료)."""
 
-    def __init__(self, minutes: float):
+    def __init__(self, minutes: float, save_path: Path | None = None, save_every_min: float = 10.0):
         super().__init__()
         self.deadline = time.time() + minutes * 60 if minutes > 0 else None
         self._t, self._n = time.time(), None
+        # 코랩 런타임이 끊기면 finally 의 last_model 저장이 안 돈다 → 주기적으로 덮어쓴다
+        self.save_path, self.save_every = save_path, save_every_min * 60
+        self._t_save = time.time()
 
     def _on_step(self) -> bool:
         now = time.time()
@@ -135,6 +138,10 @@ class TimeLimitCallback(BaseCallback):
             eta = f", 남은 {left / max(rate, 1e-6) / 3600:.1f} h" if left > 0 else ""
             print(f"[speed] 최근 1분 {rate:.0f} steps/s (step {self.num_timesteps:,}{eta})", flush=True)
             self._t, self._n = now, self.num_timesteps
+        if self.save_path is not None and now - self._t_save >= self.save_every:
+            self.model.save(str(self.save_path))
+            self._t_save = now
+            print(f"[save] step {self.num_timesteps:,} → {self.save_path}.zip", flush=True)
         if self.deadline and now > self.deadline:
             print("[train] 시간 제한 도달 → 저장 후 종료", flush=True)
             return False
@@ -169,7 +176,8 @@ def main():
     p.add_argument("--net", default="256,256")
     p.add_argument("--max-episode-s", type=float, default=60.0)
     p.add_argument("--eval-freq", type=int, default=50_000)
-    p.add_argument("--ckpt-freq", type=int, default=200_000)
+    p.add_argument("--ckpt-freq", type=int, default=100_000)
+    p.add_argument("--save-every-min", type=float, default=10.0, help="last_model 을 이 간격(분)마다 덮어씀")
     p.add_argument("--save-dir", default=None)
     p.add_argument("--resume", default=None, help="이어 학습할 zip, 또는 'auto' (save-dir 안 최신 모델)")
     p.add_argument("--time-limit-min", type=float, default=0, help="이 시간(분) 뒤 저장하고 종료 (0=제한 없음)")
@@ -235,7 +243,7 @@ def main():
         LapEvalCallback(eval_maps, cfg, save_dir, args.eval_freq),
         CheckpointCallback(max(args.ckpt_freq // args.n_envs, 1), str(save_dir / "checkpoints"),
                            name_prefix="sac"),
-        TimeLimitCallback(args.time_limit_min),
+        TimeLimitCallback(args.time_limit_min, save_dir / "last_model", args.save_every_min),
     ])
     try:
         model.learn(total_timesteps=args.timesteps, callback=cbs, reset_num_timesteps=reset_ts)
