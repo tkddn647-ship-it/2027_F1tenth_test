@@ -8,6 +8,8 @@
 > 관측 = LiDAR hist + yaw만. 센터라인은 **학습 보상/랩 채점용 privileged 신호**일 뿐이며  
 > 실차 추론(` /scan` → 정책 → `/drive`)에는 불필요하다.
 
+> **다음 설계(40 Hz · 레이싱라인 asymmetric SAC)의 레이어별 수식은 [§11](#11-다음-설계--40-hz--레이싱라인-asymmetric-sac-계획) 참고.**
+
 | 구분 | 본선 | Ablation / 레거시 |
 |------|------|-------------------|
 | 알고리즘 | **SAC** + ConnectomeRNN | plain MLP SAC / PPO |
@@ -631,6 +633,198 @@ A. 역할은 같고, 구조는 고정 초파리 배선 + 학습 scale입니다.
 
 **Q. Isaac Sim?**  
 A. 다음 스테이지로 적합. 지금은 Gym ST로 랩 안정화가 우선.
+
+---
+
+## 11. 다음 설계 — 40 Hz · 레이싱라인 Asymmetric SAC (계획)
+
+> **상태: 설계안 (미구현).** 목표는 localization 없는 **mapless end-to-end** 주행.
+> 레이싱라인은 **보상·critic(학습 전용)** 에만 쓰고, 배포되는 actor 입력은 LiDAR + 자기상태뿐이다.
+> 모방학습이 아닌 **순수 RL**: 정답 행동을 따라 하지 않고, critic만 privileged 정보를 본다.
+
+### 11.0 현재 구조와 차이
+
+| | 현재 (§1–§10) | 다음 설계 |
+|--|--|--|
+| 제어 주기 | frame_skip 4 → **10 Hz** | frame_skip 1 → **40 Hz** (LiDAR 주기) |
+| 히스토리 | 0.1 s 간격 5장, 지연 0 | 스캔 **n-4…n-1** 4장 → 명령 $a_n$ (1틱 지연) |
+| 관측 | LiDAR + yaw | LiDAR + **속도 + yaw + 직전 명령** |
+| 시간 결합 | `z.mean(dim=1)` (순서 소실) | **concat** (순서 유지) 또는 GRU/커넥톰 |
+| 보상 기준 | 센터라인 progress + CTE 벌점 | **레이싱라인** progress + 횡오차 + 목표속도 |
+| critic 입력 | actor와 동일 | actor 입력 + **privileged** $p_n$ |
+| $\gamma$ | 0.99 | $0.99^{1/4} \approx 0.9975$ |
+
+### 11.1 타이밍 (1틱 지연)
+
+```text
+스캔:   ... d_{n-4}  d_{n-3}  d_{n-2}  d_{n-1} | d_n ...
+                └──────── o_n ────────┘
+명령:                           a_n 계산 → [n, n+1] 구간(25 ms)에 적용
+```
+
+실차 계산 지연과 같은 구조이므로, 관측에 직전 명령 $a_{n-1}$을 넣어 Markov 성질을 유지한다.
+
+### 11.2 입력
+
+**Actor 관측 $o_n$** (실차에서 그대로 얻을 수 있음)
+
+```math
+d_k=\mathrm{clip}\!\left(\frac{r_k}{40},0,1\right)\in\mathbb{R}^{135},\qquad k=n-4,\dots,n-1
+```
+
+```math
+q_n=\Big[\tfrac{v_n}{v_{\max}},\ \mathrm{clip}\!\big(\tfrac{\omega_n}{3},-1,1\big),\ a_{n-1}\Big]\in\mathbb{R}^{4}
+```
+
+$v_n$: 바퀴속도(VESC), $\omega_n$: yaw rate(IMU), $a_{n-1}$: 직전 명령 2개.
+
+**Critic 추가 입력 $p_n$** (시뮬 전용 privileged)
+
+```math
+p_n=\Big[e_y,\ e_\psi,\ v_n-v_{\mathrm{ref}}(s_n),\ \beta,\ \{\kappa(s_n+j\Delta)\}_{j=1}^{K},\ \{v_{\mathrm{ref}}(s_n+j\Delta)\}_{j=1}^{K}\Big]
+```
+
+| 기호 | 의미 |
+|--|--|
+| $s_n$ | 레이싱라인 위 진행거리 |
+| $e_y,\ e_\psi$ | 레이싱라인 기준 횡오차 · 헤딩오차 |
+| $\kappa,\ v_{\mathrm{ref}}$ | 곡률 · Roboracer 제원으로 **재계산한** 목표속도 |
+| $\beta$ | 슬립각 |
+| $\Delta, K$ | 예: 1 m, 10 → $p_n\in\mathbb{R}^{24}$ |
+
+> 레이싱라인: `f1tenth_racetracks/<Track>/<Track>_raceline.csv` (`;` 구분, `s,x,y,ψ,κ,vx,ax`).
+> `vx`는 차량 기준이 다르므로 `speed_profile.py`로 $a_{lat}=6$, **실측 감속률**에 맞춰 다시 계산.
+
+### 11.3 Actor (배포 네트워크)
+
+**① LiDAR 인코더** (4장 가중치 공유)
+
+```math
+\begin{aligned}
+e^{(1)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{1\to32,\;k5,\;s2,\;p2}(d_k)\big) &&\in\mathbb{R}^{32\times68}\\
+e^{(2)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{32\to64,\;k5,\;s2,\;p2}(e^{(1)}_k)\big) &&\in\mathbb{R}^{64\times34}\\
+g_k &= \mathrm{flatten}\big(\mathrm{AvgPool}_{\to8}(e^{(2)}_k)\big) &&\in\mathbb{R}^{512}\\
+z_k &= \mathrm{ReLU}(W_z g_k+b_z) &&\in\mathbb{R}^{48}
+\end{aligned}
+```
+
+Conv 길이: $\lfloor (L+4-5)/2\rfloor+1$ → $135\to68\to34$.
+
+**② 시간 결합** (평균 금지, 순서 유지)
+
+```math
+Z_n=\big[z_{n-4};\,z_{n-3};\,z_{n-2};\,z_{n-1}\big]\in\mathbb{R}^{192}
+```
+
+(선택) 순환 메모리 — $k=n-4,\dots,n-1$ 순으로 갱신하고 $[Z_n;\,y]$를 다음 단계로:
+
+```math
+\text{GRU:}\quad h_k=\mathrm{GRU}(z_k,\,h_{k-1})
+```
+
+```math
+\text{커넥톰:}\quad h_k=h_{k-1}+\frac{\Delta t}{\tau}\Big(-h_{k-1}+\tanh\big(h_{k-1}W_{\mathrm{eff}}+D(z_k)\big)\Big),\qquad W_{\mathrm{eff}}=A_{\mathrm{signed}}\odot\mathrm{scale}\odot M
+```
+
+$A[\mathrm{pre},\mathrm{post}]$ 이므로 **전치 없이** $h\,W_{\mathrm{eff}}$ (현재 CUDA 경로 `h @ W_eff.t()`는 방향이 반대 — 수정 필요).
+$D(z_k)$: 입력 뉴런 위치에만 $W_{in}z_k$, 출력 $y=h_{n-1}[\mathrm{DN}]$.
+
+**③ 자기상태 인코더**
+
+```math
+u_n=\mathrm{ReLU}(W_q q_n+b_q)\in\mathbb{R}^{32}
+```
+
+**④ Fuse**
+
+```math
+f=\mathrm{ReLU}\Big(W_2\,\mathrm{ReLU}\big(W_1[Z_n;\,u_n]+b_1\big)+b_2\Big)\in\mathbb{R}^{256}\qquad(\text{입력 }224)
+```
+
+**⑤ Squashed Gaussian 출력**
+
+```math
+\mu=W_\mu f+b_\mu,\qquad \log\sigma=\mathrm{clip}(W_\sigma f+b_\sigma,\,-20,\,2)
+```
+
+```math
+\xi\sim\mathcal{N}(0,I),\qquad u=\mu+\sigma\odot\xi,\qquad \tilde a=\tanh(u)\in(-1,1)^2
+```
+
+```math
+\log\pi(\tilde a\,|\,o)=\sum_{i=1}^{2}\Big[\log\mathcal{N}(u_i;\mu_i,\sigma_i)-\log\big(1-\tanh^2(u_i)+\epsilon\big)\Big]
+```
+
+배포 시 $\xi=0$ → $\tilde a=\tanh(\mu)$.
+
+**⑥ 물리 명령**
+
+```math
+\delta_{\mathrm{cmd}}=\tilde a_1\,\delta_{\max},\qquad v_{\mathrm{cmd}}=v_{\min}+\frac{\tilde a_2+1}{2}\,(v_{\max}-v_{\min})
+```
+
+$\delta_{\max}=0.3735$ rad, $v\in[2,7]$ m/s.
+
+### 11.4 Critic (학습 전용, $Q_1,Q_2$ + target)
+
+```math
+c_n=\big[\mathrm{Enc}_c(o_n);\,p_n\big],\qquad Q_i(o_n,p_n,a)=W_3\,\mathrm{ReLU}\Big(W_2\,\mathrm{ReLU}\big(W_1[c_n;\,a]\big)\Big)
+```
+
+차원: $192+32+24+2=250\to256\to256\to1$. $\mathrm{Enc}_c$는 ①–③과 같은 구조, critic 전용 가중치.
+**critic만 $p_n$을 본다** — actor 입력에는 없음.
+
+### 11.5 보상 (틱 단위, $\Delta t=0.025$ s)
+
+```math
+r_n = w_s\,\Delta s_n \;-\; w_y\,e_y^2\,\Delta t \;-\; w_v\,(v_n-v_{\mathrm{ref}})^2\,\Delta t \;-\; w_\delta\,|\delta_n-\delta_{n-1}| \;-\; w_\beta\,\max(|\beta|-0.04,\,0)\,\Delta t
+```
+
+충돌 시 $r=-C$ 후 종료. 시간 비례 항에 $\Delta t$를 곱해 제어 주기를 바꿔도 크기가 유지되게 한다.
+
+### 11.6 손실
+
+**Critic (soft Bellman)**
+
+```math
+y=r_n+\gamma(1-\mathrm{done})\Big[\min_{j=1,2}\bar Q_j(o_{n+1},p_{n+1},a')-\alpha\log\pi(a'\,|\,o_{n+1})\Big],\qquad a'\sim\pi(\cdot\,|\,o_{n+1})
+```
+
+```math
+\mathcal{L}_Q=\mathbb{E}\Big[\sum_{i=1,2}\big(Q_i(o_n,p_n,a_n)-y\big)^2\Big]
+```
+
+**Actor**
+
+```math
+\mathcal{L}_\pi=\mathbb{E}_{o,p,\xi}\Big[\alpha\log\pi(\tilde a\,|\,o_n)-\min_{j}Q_j(o_n,p_n,\tilde a)\Big]
+```
+
+기울기: $Q\to\tilde a\to(\mu,\sigma)\to f\to$ 인코더. critic이 레이싱라인을 알고 있으므로 그 가치 신호가 LiDAR만 보는 actor로 전달된다.
+
+**온도 · target**
+
+```math
+\mathcal{L}_\alpha=\mathbb{E}\big[-\alpha\big(\log\pi(\tilde a\,|\,o)+\bar{\mathcal H}\big)\big],\quad \bar{\mathcal H}=-2;\qquad \bar\theta\leftarrow0.995\,\bar\theta+0.005\,\theta;\qquad \gamma=0.99^{1/4}
+```
+
+### 11.7 차원 흐름
+
+```text
+actor : 4×135 ─Conv×2·Pool·FC→ 4×48 ─concat→ 192 ┐
+        q(4) ─FC→ 32 ────────────────────────────┴→ 224 → 256 → 256 → (μ,σ)∈R² → tanh → (δ, v)
+
+critic: [192 ; 32 ; p 24 ; a 2] = 250 → 256 → 256 → Q
+```
+
+### 11.8 구현 메모
+
+- 리플레이 버퍼에 $o_n$, $p_n$ 둘 다 저장 → obs를 `Dict{"obs", "priv"}`로.
+  SAC 기본값 `share_features_extractor=False`이므로 actor extractor는 `priv`를 버리고 critic extractor만 사용.
+- 스텝 단위 상수 ×4: `MAX_STEPS`, `REVERSE_GRACE_STEPS`, `REVERSE_STREAK`, eval/ckpt 주기.
+- 40 Hz 레이캐스트: 현재 순수 Python 약 18 ms/스캔 → EDT sphere-tracing + numba로 가속 필요.
+- sim2real: 실차 AUTO 속도 PI는 duty 하한 0(능동 제동 없음), duty rate 0.6/s → 실측 감속·조향 응답을 동역학에 반영.
+- 평가: 학습에 안 쓴 트랙에서 완주율 → 랩타임, 실차 FGM 대비.
 
 ---
 
