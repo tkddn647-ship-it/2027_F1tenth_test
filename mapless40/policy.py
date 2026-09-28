@@ -62,14 +62,15 @@ class BEVRasterizer(nn.Module):
 
     def __init__(self, lidar: LidarSpec, norm: NormSpec, hist: int,
                  x_min: float = -1.5, x_max: float = 13.5, y_half: float = 7.5,
-                 res: float = 0.1, free_samples: int = 16, free_stride: int = 3):
+                 res: float = 0.1, free_stride: int = 4):
         super().__init__()
         half = lidar.fov / 2.0
         ang = torch.linspace(-half, half, lidar.n_beams)
         self.register_buffer("cos_a", torch.cos(ang), persistent=False)
         self.register_buffer("sin_a", torch.sin(ang), persistent=False)
-        fr = (torch.arange(free_samples, dtype=torch.float32) + 0.5) / free_samples
-        self.register_buffer("free_frac", fr, persistent=False)
+        # 빈공간: 빔을 따라 격자 한 칸(res) 간격으로 칠한다 (개수 고정 샘플이면 먼 곳에 구멍이 생김)
+        ft = torch.arange(res / 2, lidar.range_max, res, dtype=torch.float32)
+        self.register_buffer("free_t", ft, persistent=False)
         self.range_max, self.mount_x = lidar.range_max, lidar.mount_x
         self.v_scale, self.w_scale, self.dt_nom = norm.v_scale, norm.w_scale, norm.dt_nominal
         self.hist, self.x_min, self.y_half, self.res = hist, x_min, y_half, res
@@ -125,10 +126,12 @@ class BEVRasterizer(nn.Module):
         # 빈공간 채널 (최신 프레임, 빔을 따라 샘플)
         rs = r[:, T - 1, ::self.free_stride]                   # (B, N')
         ca, sa = self.cos_a[::self.free_stride], self.sin_a[::self.free_stride]
-        tt = rs[:, :, None] * self.free_frac                   # (B, N', S)
-        fx = (tt * ca[None, :, None] + self.mount_x).reshape(b, -1)
-        fy = (tt * sa[None, :, None]).reshape(b, -1)
-        idx_all.append(self._cells(fx, fy, T))
+        tt = self.free_t[None, None, :]                        # (1, 1, S)
+        fx = (tt * ca[None, :, None] + self.mount_x).expand(b, -1, -1).reshape(b, -1)
+        fy = (tt * sa[None, :, None]).expand(b, -1, -1).reshape(b, -1)
+        before_hit = (tt < rs[:, :, None] - self.res).reshape(b, -1)   # 벽 한 칸 앞까지만
+        fidx = self._cells(fx, fy, T)
+        idx_all.append(torch.where(before_hit, fidx, torch.full_like(fidx, self.C * self.H * self.W)))
 
         idx = torch.cat(idx_all, dim=1)
         img = torch.zeros(b, self.C * self.H * self.W + 1, device=scan.device)

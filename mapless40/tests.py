@@ -205,7 +205,27 @@ def test_bev_raster_geometry():
     row = int((5.0 + sp.mount_x - ras.x_min) / ras.res)
     col = int(ras.y_half / ras.res)
     assert img[3, row - 1:row + 2, col - 1:col + 2].sum() > 0, "정면 5 m 점이 격자에 찍혀야 함"
-    assert img[4, row - 10, col] > 0, "빔 경로는 빈공간 채널에 찍혀야 함"
+    for x in (1.0, 2.5, 4.0):                        # 빔 경로 위 여러 거리 (벽 5 m 앞)
+        rr = int((x + sp.mount_x - ras.x_min) / ras.res)
+        assert img[4, rr, col - 1:col + 2].sum() > 0, f"빔 경로 {x} m 지점이 빈공간 채널에 찍혀야 함"
+    assert img[4, row + 5:, col].sum() == 0, "벽 뒤는 빈공간으로 칠하면 안 됨"
+
+
+def test_bev_raster_numpy():
+    from .config import NormSpec
+    from .viz_encoder import bev_raster
+    sp = LidarSpec()
+    a = beam_angles(sp)
+    r = np.full(sp.n_beams, 1.0, np.float32)
+    r[np.abs(a) < 0.02] = 5.0 / sp.range_max
+    img, ex = bev_raster(np.stack([r] * 4), np.zeros(STATE_DIM, np.float32), sp, NormSpec())
+    col = int(ex["y_half"] / 0.1)
+    row = int((5.0 + sp.mount_x - ex["x_min"]) / 0.1)
+    assert img[3, row - 1:row + 2, col - 1:col + 2].sum() > 0
+    for x in (1.0, 2.5, 4.0):
+        rr = int((x + sp.mount_x - ex["x_min"]) / 0.1)
+        assert img[4, rr, col - 1:col + 2].sum() > 0, x
+    assert img[4, row + 5:, col].sum() == 0
 
 
 def test_connectome_dense_equals_sparse():
@@ -243,7 +263,7 @@ def main():
     tests = [test_preprocess_scan_grid_and_min, test_preprocess_scan_orientation,
              test_interval_averager, test_obs_history_layout, test_action_mapping,
              test_drive_model_no_active_brake, test_raycast_matches_bruteforce,
-             test_env_spaces_and_latency]
+             test_env_spaces_and_latency, test_bev_raster_numpy]
     if not quick:
         tests.append(test_env_ftg_completes_lap)
     if _torch_ok():
