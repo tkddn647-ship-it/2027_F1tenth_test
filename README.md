@@ -847,6 +847,7 @@ critic: [192 ; 32 ; p 24 ; a 2] = 250 → 256 → 256 → Q
 | `mapless40/train.py` · `evaluate.py` · `export.py` | 학습 · 평가/궤적 PNG · TorchScript/ONNX 내보내기 |
 | `mapless40/ros_node.py` | Jetson ROS2 노드 (`/scan` 콜백 = 제어 1회, 맵·인터넷 불필요) |
 | `mapless40/tests.py` | numpy 테스트 + (torch 있으면) 정책·커넥톰 테스트 |
+| `mapless40/viz_encoder.py` | CNN 입력(1D 스캔 행렬 / BEV 이미지)과 층별 출력 시각화, numpy 만으로 동작 |
 
 ### 12.1 순서
 
@@ -870,6 +871,10 @@ python -m mapless40.train ... --encoder bev
 # ④ 평가 (학습에 안 쓴 맵 포함, 궤적 PNG → eval_out/)
 python -m mapless40.evaluate --model runs/mapless40_conv1d_<시각>/best_model.zip --maps Budapest,ifac,Spielberg
 
+# ⑤' 학습 없이 CNN 입력/출력 그림 보기 (numpy 만, torch 불필요) → viz_out/
+python -m mapless40.viz_encoder --map ifac                 # 학습 전 랜덤 가중치
+python -m mapless40.viz_encoder --map ifac --model runs/mapless40_conv1d_<시각>/best_model.zip   # 학습 후
+
 # ⑤ 내보내기 → Jetson 에 actor.ts.pt + actor_meta.json 두 파일만 복사
 python -m mapless40.export runs/mapless40_conv1d_<시각>/best_model.zip --onnx
 python -m mapless40.evaluate --model runs/mapless40_conv1d_<시각>/actor.ts.pt --maps ifac   # 배포 파일로 재확인
@@ -891,8 +896,9 @@ python3 -m mapless40.ros_node --ros-args -p model:=actor.ts.pt -p meta:=actor_me
 |--|--|
 | LiDAR 시뮬 1125빔 | 2.5 ms/스캔, 1 cm 브루트포스 대비 오차 ≤ 3 cm |
 | env 1스텝 (25 ms 시뮬) | 약 3 ms → 실시간의 약 8배 |
-| FTG (mapless, 최신 스캔만) | ifac 19.3 s · Spielberg 102 s · Budapest 105 s 완주 |
-| Pure pursuit (privileged, 90% 속도) | ifac 17.0 s · Spielberg 63 s · Monza 83 s · Silverstone 90 s 완주 |
+| FTG (mapless, 최신 스캔만, v 1.5~5) | ifac 19.3 s · Spielberg 102 s · Budapest 105 s 완주 (v 2~7 이면 ifac 17.6~18.1 s) |
+| Pure pursuit (privileged, 90% 속도) | Spielberg 63 s · Monza 83 s · Silverstone 90 s 완주 |
+| ifac, 최소곡률 라인 기준 | 라인 40.8 m, 이론 10.9 s, pure pursuit 11.3~11.6 s (실제 대회 최고 9 s 초반 · 평균 10 s 후반) |
 | BEV 프레임 정렬 (IMU·속도 적분) | 실제 pose 대비 1.5 cm · 0.01° 이내 |
 
 torch / SB3 부분(`policy.py`, `train.py`, `export.py`)은 이 작업 환경에 torch 를 설치할 수 없어 **SB3 소스 기준으로 작성만** 했다.
@@ -903,6 +909,9 @@ torch / SB3 부분(`policy.py`, `train.py`, `export.py`)은 이 작업 환경에
 - **ST 모델의 μ**: 선형 타이어라 μ 는 코너링 강성 배율일 뿐 횡력 한계가 아니다. 기존 `STParams.roboracer()` 의 μ = a_lat/g ≈ 0.61 은
   언더스티어만 키우고(5.7 m/s 에서 요레이트가 기구학의 68 %) 횡가속은 8 m/s² 까지 허용했다 → mapless40 은 식별값 μ = 1.05 + 별도 횡가속 캡 7 m/s².
 - **f1tenth_racetracks 레이싱라인**은 벽에서 0.1~0.3 m 까지 붙어 있어 차체(반폭 0.15, CG→앞 0.33)로는 그대로 따라가면 충돌 → 0.45 m 밀어냄.
+- **센터라인만 있는 맵**(ifac 등)은 센터라인을 그대로 쓰면 이론 랩타임이 14.6 s 로 실측(9~10 s대)보다 한참 느리다 →
+  elastic band 로 **최소곡률 근사 라인**(46.1 m → 40.8 m)을 만들어 쓴다 (`RacelineSpec.optimize_centerline`).
+  그래도 실측 최고 기록보다 느리면 `a_lat`·감속 한계가 실제보다 보수적인 것 → 실측해서 올릴 것.
 - **커넥톰 CUDA 경로 방향 버그** 수정 (`connectome_rnn.py`, 테스트 포함).
 
 ### 12.4 실차 전에 측정할 값 (`config.py` 의 `[측정 필요]`)

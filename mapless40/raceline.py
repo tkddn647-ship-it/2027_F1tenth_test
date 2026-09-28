@@ -76,9 +76,28 @@ def push_from_walls(x: np.ndarray, y: np.ndarray, grid, margin: float,
     return x, y
 
 
+def min_curvature_band(x: np.ndarray, y: np.ndarray, grid, margin: float,
+                       iters: int = 4000) -> tuple[np.ndarray, np.ndarray]:
+    """센터라인 → 최소곡률 근사 라인 (elastic band).
+
+    매 반복마다 점을 이웃 두 점의 중점 쪽으로 당겨(줄을 팽팽하게 = 곡률·길이 감소)
+    벽까지 margin 보다 가까워진 점은 거리장 기울기로 밀어낸다.
+    레이싱라인 CSV 가 없는 맵(ifac 등 직접 매핑한 트랙)에서 센터라인 대신 쓴다.
+    ifac: 센터라인 46.1 m → 40.6 m, 같은 한계에서 이론 랩타임 14.6 s → 10.6 s.
+    """
+    x, y = x.copy(), y.copy()
+    for _ in range(iters):
+        xm = 0.5 * (np.roll(x, 1) + np.roll(x, -1))
+        ym = 0.5 * (np.roll(y, 1) + np.roll(y, -1))
+        x += 0.5 * (xm - x)
+        y += 0.5 * (ym - y)
+        x, y = push_from_walls(x, y, grid, margin, iters=3, step=0.02)
+    return x, y
+
+
 class Raceline:
     def __init__(self, xy: np.ndarray, spec: RacelineSpec, ds: float = 0.2, grid=None,
-                 decel_fn=None):
+                 decel_fn=None, optimize: bool = False):
         self.decel_fn = decel_fn
         xy = np.asarray(xy, dtype=np.float64)
         if np.linalg.norm(xy[0] - xy[-1]) < 1e-6:
@@ -95,6 +114,8 @@ class Raceline:
         x, y = _smooth_periodic(x, win), _smooth_periodic(y, win)
         if grid is not None and spec.wall_margin > 0:
             x, y = push_from_walls(x, y, grid, spec.wall_margin)
+            if optimize:
+                x, y = min_curvature_band(x, y, grid, spec.wall_margin)
             x, y = _smooth_periodic(x, 3), _smooth_periodic(y, 3)
             x, y = push_from_walls(x, y, grid, spec.wall_margin, iters=20)
         # 재매개변수화 (밀어낸 뒤 호장 길이 갱신)
@@ -174,4 +195,5 @@ def load_raceline(map_yaml: Path, spec: RacelineSpec, grid=None, decel_fn=None) 
     f = find_line_file(Path(map_yaml))
     if f is None:
         raise FileNotFoundError(f"레이싱라인/센터라인 CSV 없음: {map_yaml.parent}")
-    return Raceline(_read_xy(f), spec, grid=grid, decel_fn=decel_fn), f
+    optimize = spec.optimize_centerline and "raceline" not in f.name
+    return Raceline(_read_xy(f), spec, grid=grid, decel_fn=decel_fn, optimize=optimize), f

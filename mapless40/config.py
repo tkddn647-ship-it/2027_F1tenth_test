@@ -79,7 +79,7 @@ class ImuSpec:
 
 @dataclass
 class ActionSpec:
-    v_min: float = 1.5
+    v_min: float = 2.0
     v_max: float = 7.0
 
 
@@ -98,12 +98,15 @@ class RacelineSpec:
     a_accel: float = 5.0
     a_brake: float = 1.8           # 실차 타력 감속 수준에 맞춤 [측정 필요]
     v_max: float = 7.0
-    v_min: float = 1.5
+    v_min: float = 2.0
     lookahead_n: int = 10
     lookahead_ds: float = 1.0
     wall_margin: float = 0.45      # 라인을 벽에서 최소 이만큼 떨어뜨림 (반폭 0.15 + 여유)
     smooth_m: float = 1.0          # 라인 좌표 스무딩 창 [m]
     kappa_smooth_m: float = 2.0    # 곡률 스무딩 창 [m]
+    # 레이싱라인 CSV 가 없고 센터라인만 있는 맵은 최소곡률 근사 라인으로 바꿔 쓴다.
+    # (센터라인 기준이면 ifac 이론 랩타임이 실측보다 4~5 s 느리게 나옴)
+    optimize_centerline: bool = True
 
 
 @dataclass
