@@ -894,15 +894,28 @@ python -m mapless40.export runs/mapless40_conv1d_<시각>/best_model.zip --onnx
 python -m mapless40.evaluate --model runs/mapless40_conv1d_<시각>/actor.ts.pt --maps ifac   # 배포 파일로 재확인
 ```
 
-Jetson (ROS2, 레포 루트에서):
+Jetson (ROS2, 레포 루트에서). 먼저 Roboracer 스택의 센서·제어 노드를 띄운다
+(sllidar **40 Hz**, ebimu_driver, sensor_static_tf, control_node AUTO. Cartographer·Stanley 는 필요 없음):
 
 ```bash
-python3 -m mapless40.ros_node --ros-args -p model:=actor.ts.pt -p meta:=actor_meta.json \
-  -p max_speed:=2.0 -p mount_yaw:=0.0
+python3 -m mapless40.ros_node --ros-args -p model:=actor.ts.pt -p meta:=actor_meta.json -p max_speed:=2.5
 ```
 
+Roboracer-2026-main 과 맞춘 것:
+
+| 항목 | 스택 실제 값 | 노드 |
+|--|--|--|
+| `/scan` | sllidar_node, 한 바퀴 360° 전체, angle = π − raw, `angle_compensate=false` → 점 수가 회전마다 조금씩 다름 | 각도 기준으로 0.24° 격자 1125칸에 재배치 (점 수 무관) |
+| 빔 수 | 60 kHz / 40 Hz = 1500점/360° = 0.24° → 270° 안 1125 | 학습 격자 1125 (20 Hz 로 켜면 2250점 → 같은 격자로 min-pool, 대신 주기 경고) |
+| 라이다 방향 | TF `base_link→laser` (`sensor_static_tf`, `lidar_yaw` 기본 0). 2026-08-15 실측 기록은 **정면 = 스캔 −177°** | `mount_yaw` 미지정이면 TF yaw 사용 + **시작 검사**: 정지 상태 40장으로 차체에 가린 구간이 차 뒤(±180°)인지 확인, 앞이면 명령 안 내고 보정값 출력 |
+| 라이다 위치 | base_link(뒷바퀴축) +0.31 m | sim `mount_x` = 0.31 − l_r 0.171 = 0.139 (CG 기준) |
+| `/imu/data` | ebimu_driver, imu_link 축 = base_link 축, ~95 Hz, header.stamp 는 PLL 10 ms 간격 | `angular_velocity.z`, **header.stamp 사용** (수신 시각은 시리얼 배치로 뭉침), ±8 rad/s 클립 |
+| `/vehicle/speed_mps` | control_node, **Float64**, 50 Hz | Float64 구독 (`speed_msg_type`) |
+| `/drive` | control_node AUTO, 조향 풀스케일 0.3735 rad, +조향 = 좌 | 같은 규약 |
+
+- IMU 가 orientation-only 모드(3필드)면 드라이버가 yaw 차분으로 ω 를 만들어 ±180° 에서 튄다 → **9필드(자이로 포함) 스트림**으로 켤 것.
 - `/scan` 원본을 구독한다 (`scan_rate_adapter` 쓰지 말 것). e-stop·AEB 는 기존 노드 그대로.
-- 첫 시험은 `max_speed:=2.0` 으로 상한을 걸고, 로그의 `latency ms` 가 25 ms 보다 충분히 작은지 확인.
+- 2초마다 로그: `scan Hz`, IMU/속도 수신 여부, `latency ms`. latency 가 25 ms 보다 충분히 작은지 확인.
 
 ### 12.2 이 환경에서 확인한 것 (numpy 부분)
 
@@ -932,8 +945,6 @@ torch / SB3 부분(`policy.py`, `train.py`, `export.py`)은 이 작업 환경에
 
 | 값 | 기본값 | 측정 방법 |
 |--|--|--|
-| 실제 빔 수 `n_beams` | 1125 | `/scan` 의 `len(ranges)`, `angle_increment` |
-| `mount_yaw` | 0 | 스캔 0° 가 정면인지 (`sensor_static_tf` 의 `lidar_yaw`) |
 | 서보 `servo_dead_time` / `servo_tau` / `servo_rate_max` | 15 ms / 50 ms / 4 rad/s (보수적) | 조향 step 명령 → IMU 요레이트 응답 |
 | 타력 감속 `coast_decel_c0` / `c1` | 0.6 / 0.15 | 지면에서 목표속도를 내리는 step → VESC 속도 로그 |
 | `accel_max` · `jerk_max` · `drive_dead_time` | 5 m/s² · 40 m/s³ · 30 ms (보수적) | 목표속도 올리는 step |

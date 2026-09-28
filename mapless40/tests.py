@@ -287,12 +287,40 @@ def test_connectome_dense_equals_sparse():
     assert np.allclose(ref, np.stack(ys), atol=1e-4), "numpy 참조 구현과 같아야 함"
 
 
+def test_real_sllidar_layout_and_front_check():
+    """sllidar_node 실제 형식: 40 Hz 한 바퀴 1500점, angle = π − raw → [−π, π].
+    라이다를 뒤로 달아 스캔 0° 가 차 뒤를 보는 경우(2026-08-15 실측)를 흉내낸다."""
+    from .obs_builder import blocked_center_deg, invalid_bins
+    sp = LidarSpec()
+    n = 1500                                   # 60 kHz / 40 Hz
+    amin, inc = -np.pi, 2 * np.pi / (n - 1)
+    scan_ang = amin + inc * np.arange(n)
+    true_mount = np.pi                         # 차량각 = 스캔각 + π
+    veh = (scan_ang + true_mount + np.pi) % (2 * np.pi) - np.pi
+    r = np.full(n, 6.0)
+    r[np.abs(veh - np.pi / 2) < 0.05] = 1.0    # 차 왼쪽 벽
+    r[np.abs(np.abs(veh) - np.pi) < np.radians(47)] = np.inf   # 차 뒤 95° 가림
+    # 270° 안에 들어오는 점 수 = 1125 (학습 격자와 같음)
+    assert abs(int(np.sum(np.abs(veh) <= np.radians(135) + 1e-9)) - sp.n_beams) <= 2
+    # 올바른 mount → 가린 구간이 뒤, 왼쪽 벽이 +90° 칸
+    c, w = blocked_center_deg(invalid_bins(r, amin, inc, true_mount))
+    assert abs(abs(c) - 180) < 15 and 70 < w < 130, (c, w)
+    sp.mount_yaw = true_mount
+    s = preprocess_scan(r, amin, inc, sp)
+    a = beam_angles(sp)
+    assert s[np.argmin(np.abs(a - np.pi / 2))] < 0.1 and s[np.argmin(np.abs(a + np.pi / 2))] > 0.3
+    # 틀린 mount(0) → 가린 구간이 정면으로 보여 검사가 잡아야 함
+    c0, _ = blocked_center_deg(invalid_bins(r, amin, inc, 0.0))
+    assert abs(c0) < 20, c0
+
+
 def main():
     quick = "--quick" in sys.argv
     tests = [test_preprocess_scan_grid_and_min, test_preprocess_scan_orientation,
              test_interval_averager, test_obs_history_layout, test_action_mapping,
              test_drive_model_no_active_brake, test_raycast_matches_bruteforce,
-             test_env_spaces_and_latency, test_bev_raster_numpy, test_obstacles_lidar_and_collision]
+             test_env_spaces_and_latency, test_bev_raster_numpy, test_obstacles_lidar_and_collision,
+             test_real_sllidar_layout_and_front_check]
     if not quick:
         tests.append(test_env_ftg_completes_lap)
     if _torch_ok():
