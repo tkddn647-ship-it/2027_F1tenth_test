@@ -70,7 +70,8 @@ class LapEvalCallback(BaseCallback):
     def _run(self, m: str, k: int) -> dict:
         line_len = next(t for t in self.env.tracks if t.name == m).line.length
         obs, _ = self.env.reset(seed=1000 + k, options={
-            "map": m, "s0": line_len * k / self.n_spawns, "lat": 0.0, "dyaw": 0.0, "v0": 1.5})
+            "map": m, "s0": line_len * k / self.n_spawns, "lat": 0.0, "dyaw": 0.0, "v0": 1.5,
+            "n_obstacles": 0 if k == 0 else 2})       # 출발0 = 순수 랩타임, 나머지 = 장애물 2개
         vs = []
         while True:
             a, _ = self.model.predict(obs, deterministic=True)
@@ -141,7 +142,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--maps", default="Spielberg,Silverstone,Monza,Catalunya")
     p.add_argument("--eval-maps", default="Budapest")
-    p.add_argument("--encoder", choices=["conv1d", "bev"], default="bev")
+    p.add_argument("--encoder", choices=["conv1d", "bev", "both"], default="both")
     p.add_argument("--timesteps", type=int, default=2_000_000)
     p.add_argument("--n-envs", type=int, default=8)
     p.add_argument("--subproc", action="store_true", help="env 를 프로세스로 병렬 실행")

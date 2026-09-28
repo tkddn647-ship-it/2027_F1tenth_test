@@ -11,6 +11,7 @@ LiDAR 인코더 두 종류 (--encoder):
   conv1d : 프레임마다 Conv1d×3 → 48, 4장 concat → 192          (range view, 기준선)
   bev    : IMU·속도로 4프레임을 현재 차 기준에 정렬해 150×150 격자에 찍고
            (프레임별 점유 4ch + 최신 프레임 빈공간 1ch) → Conv2d×4 → 192
+  both   : conv1d 192 ‖ bev 192 → 384  (기본값, 장애물 대응)
 
 배포되는 건 actor 뿐 → priv 는 actor 에 절대 들어가지 않는다 (make_actor 참고).
 """
@@ -162,6 +163,22 @@ class ScanEncoderBEV(nn.Module):
         return self.fc(self.cnn(img))
 
 
+class ScanEncoderBoth(nn.Module):
+    """1D CNN(거리 배열) 과 BEV 2D CNN(x,y 격자) 을 나란히 돌려 이어 붙인다 → 192 + 192 = 384.
+
+    1D 는 각도별 거리 패턴(틈 방향), BEV 는 공간 모양(장애물·벽 위치)을 맡는다.
+    """
+
+    def __init__(self, lidar: LidarSpec, norm: NormSpec, hist: int):
+        super().__init__()
+        self.d1 = ScanEncoder1D(lidar.n_beams, hist)
+        self.bev = ScanEncoderBEV(lidar, norm, hist)
+        self.features_dim = self.d1.features_dim + self.bev.features_dim
+
+    def forward(self, scan: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+        return torch.cat([self.d1(scan, state), self.bev(scan, state)], dim=1)
+
+
 # ----------------------------------------------------------------- extractor
 class AsymFeatures(BaseFeaturesExtractor):
     """Dict obs → 특징. use_priv=False 면 priv 를 읽지도 않는다 (actor)."""
@@ -178,6 +195,8 @@ class AsymFeatures(BaseFeaturesExtractor):
             enc = ScanEncoder1D(n_beams, hist)
         elif encoder == "bev":
             enc = ScanEncoderBEV(lidar, norm, hist)
+        elif encoder == "both":
+            enc = ScanEncoderBoth(lidar, norm, hist)
         else:
             raise ValueError(f"unknown encoder {encoder}")
         feat = enc.features_dim + state_dim_out + (PRIV_DIM if use_priv else 0)

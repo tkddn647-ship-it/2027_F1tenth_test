@@ -124,6 +124,19 @@ class RewardSpec:
 
 
 @dataclass
+class ObstacleSpec:
+    """정적 장애물 (콘·박스 크기 원통). 에피소드마다 무작위, 한쪽은 반드시 지나갈 틈을 남긴다."""
+
+    prob: float = 0.7              # 이 확률로 장애물 있는 에피소드
+    max_n: int = 3                 # 1 ~ max_n 개
+    r_range: tuple[float, float] = (0.12, 0.30)   # 반지름 [m]
+    min_gap: float = 0.80          # 장애물 옆 통과 폭 최소 (차폭 0.30 + 넉넉한 여유)
+    min_ahead: float = 6.0         # 스폰 지점에서 최소 이만큼 앞에
+    min_sep: float = 2.0           # 장애물끼리 라인 방향 최소 간격 [m]
+    lat_range: float = 0.6         # 레이싱라인 기준 좌우 배치 범위 [m]
+
+
+@dataclass
 class EnvConfig:
     lidar: LidarSpec = field(default_factory=LidarSpec)
     timing: TimingSpec = field(default_factory=TimingSpec)
@@ -133,6 +146,7 @@ class EnvConfig:
     norm: NormSpec = field(default_factory=NormSpec)
     raceline: RacelineSpec = field(default_factory=RacelineSpec)
     reward: RewardSpec = field(default_factory=RewardSpec)
+    obstacles: ObstacleSpec = field(default_factory=ObstacleSpec)
     max_episode_s: float = 60.0
     # 선형 타이어 ST 모델에서 μ 는 코너링 강성 배율일 뿐 횡력 한계가 아니다.
     # 기존 STParams.roboracer() 의 μ = a_lat/g ≈ 0.61 은 과도한 언더스티어만 만들고
@@ -154,5 +168,5 @@ class EnvConfig:
 
 # 관측 차원 (정책·노드 공용)
 STATE_DIM = 17   # v̄×4, ω̄×4, ω_latest, (δ,v)_{n-2}, (δ,v)_{n-1}, Δt×4
-PRIV_DIM = 24    # e_y, e_ψ, v−v_ref, β, κ×10, v_ref×10
+PRIV_DIM = 27    # e_y, e_ψ, v−v_ref, β, κ×10, v_ref×10, 앞 장애물(거리, 옆 오프셋, 반지름)
 GAMMA_40HZ = 0.99 ** 0.25

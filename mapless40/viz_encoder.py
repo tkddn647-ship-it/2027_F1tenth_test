@@ -88,6 +88,9 @@ class Weights:
         from stable_baselines3 import SAC
         sd = SAC.load(model_zip, device="cpu").policy.actor.features_extractor.state_dict()
         g = lambda k: sd[k].numpy()  # noqa: E731
+        # encoder='both' 면 키가 scan_enc.d1.* / scan_enc.bev.* → 단일 인코더 이름으로 맞춤
+        sd = {k.replace("scan_enc.d1.", "scan_enc.").replace("scan_enc.bev.", "scan_enc."): v
+              for k, v in sd.items()}
         if "scan_enc.conv.0.weight" in sd:
             self.c1 = (g("scan_enc.conv.0.weight"), g("scan_enc.conv.0.bias"))
             self.c2 = (g("scan_enc.conv.2.weight"), g("scan_enc.conv.2.bias"))
@@ -215,7 +218,7 @@ def draw_world(ax, env, span=6.0):
     x, y, yaw = env.state[0], env.state[1], env.state[4]
     ext = [g.ox, g.ox + g.w * g.res, g.oy, g.oy + g.h * g.res]
     ax.imshow(np.where(g.occ, 0.35, 1.0), cmap="gray", extent=ext, vmin=0, vmax=1, origin="upper")
-    raw = env.lidar.scan(x, y, yaw, noise=False)
+    raw = env.lidar.scan(x, y, yaw, noise=False, obstacles=getattr(env, "obstacles", None))
     ang = beam_angles(env.cfg.lidar)
     lx = x + env.cfg.lidar.mount_x * np.cos(yaw)
     ly = y + env.cfg.lidar.mount_x * np.sin(yaw)
@@ -223,6 +226,9 @@ def draw_world(ax, env, span=6.0):
         ax.plot([lx, lx + raw[i] * np.cos(yaw + ang[i])], [ly, ly + raw[i] * np.sin(yaw + ang[i])],
                 color="#9ecae1", lw=0.5, zorder=2)
     ax.scatter(lx + raw * np.cos(yaw + ang), ly + raw * np.sin(yaw + ang), s=1.2, color="#08306b", zorder=3)
+    import matplotlib.pyplot as plt
+    for cx, cy, r in getattr(env, "obstacles", np.zeros((0, 3))):
+        ax.add_patch(plt.Circle((cx, cy), r, color="#d62728", zorder=5))
     L = 0.6
     ax.arrow(x, y, L * np.cos(yaw), L * np.sin(yaw), width=0.08, color="#e6550d", zorder=4)
     ax.set_xlim(x - span, x + span); ax.set_ylim(y - span, y + span); ax.set_aspect("equal")

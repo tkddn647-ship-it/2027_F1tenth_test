@@ -143,7 +143,7 @@ def test_env_ftg_completes_lap(max_s: float = 40.0):
     env.cfg.max_episode_s = max_s
     env.randomize = False
     ctrl = ftg_controller(env.cfg)
-    obs, _ = env.reset(seed=3, options={"s0": 0.0, "lat": 0.0, "dyaw": 0.0, "v0": 1.5})
+    obs, _ = env.reset(seed=3, options={"s0": 0.0, "lat": 0.0, "dyaw": 0.0, "v0": 1.5, "n_obstacles": 0})
     while True:
         obs, r, term, trunc, info = env.step(ctrl(obs))
         if term or trunc or info["laps"] >= 1:
@@ -165,7 +165,7 @@ def test_policy_actor_ignores_priv():
     import torch
     from stable_baselines3 import SAC
     from .policy import AsymFeatures, AsymSACPolicy
-    for enc in ("conv1d", "bev"):
+    for enc in ("conv1d", "bev", "both"):
         env = _env()
         model = SAC(AsymSACPolicy, env, buffer_size=100, learning_starts=10, batch_size=8,
                     policy_kwargs=dict(features_extractor_class=AsymFeatures,
@@ -209,6 +209,35 @@ def test_bev_raster_geometry():
         rr = int((x + sp.mount_x - ras.x_min) / ras.res)
         assert img[4, rr, col - 1:col + 2].sum() > 0, f"빔 경로 {x} m 지점이 빈공간 채널에 찍혀야 함"
     assert img[4, row + 5:, col].sum() == 0, "벽 뒤는 빈공간으로 칠하면 안 됨"
+
+
+def test_obstacles_lidar_and_collision():
+    from .raycast import ray_circles
+    # 정면 3 m 에 반지름 0.2 원 → 정면 빔 2.8 m
+    t = ray_circles(0.0, 0.0, np.array([0.0, np.pi / 2]), np.array([[3.0, 0.0, 0.2]]), 15.0)
+    assert abs(t[0] - 2.8) < 1e-6 and t[1] == 15.0
+    env = _env()
+    for seed in range(5):
+        obs, info = env.reset(seed=seed, options={"n_obstacles": 3})
+        ob = info["obstacles"]
+        assert 1 <= len(ob) <= 3
+        g = env.track.grid
+        assert (g.distance(ob[:, 0], ob[:, 1]) > ob[:, 2]).all(), "장애물이 벽에 박히면 안 됨"
+        assert env._priv().shape == (PRIV_DIM,)
+    # 장애물을 차 바로 앞에 두면 LiDAR 에 보이고, 들이받으면 충돌
+    env.reset(seed=0, options={"n_obstacles": 0, "v0": 3.0, "lat": 0.0, "dyaw": 0.0})
+    x, y, yaw = env.state[0], env.state[1], env.state[4]
+    env.obstacles = np.array([[x + 1.5 * np.cos(yaw), y + 1.5 * np.sin(yaw), 0.25]])
+    env.obs_s = np.array([env.s + 1.5]); env.obs_lat = np.array([0.0])
+    scan = env._raw_scan()
+    mid = CFG.lidar.n_beams // 2
+    assert abs(scan[mid] * CFG.lidar.range_max - (1.5 - 0.25 - CFG.lidar.mount_x)) < 0.1
+    hit = False
+    for _ in range(40):
+        _, _, term, _, info = env.step(np.array([0.0, 0.0], np.float32))
+        if term:
+            hit = info["collided"]; break
+    assert hit, "장애물에 부딪히면 충돌로 끝나야 함"
 
 
 def test_bev_raster_numpy():
@@ -263,7 +292,7 @@ def main():
     tests = [test_preprocess_scan_grid_and_min, test_preprocess_scan_orientation,
              test_interval_averager, test_obs_history_layout, test_action_mapping,
              test_drive_model_no_active_brake, test_raycast_matches_bruteforce,
-             test_env_spaces_and_latency, test_bev_raster_numpy]
+             test_env_spaces_and_latency, test_bev_raster_numpy, test_obstacles_lidar_and_collision]
     if not quick:
         tests.append(test_env_ftg_completes_lap)
     if _torch_ok():

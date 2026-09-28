@@ -102,8 +102,9 @@ def model_controller(path: str):
     return lambda obs, env=None: model.predict(obs, deterministic=True)[0]
 
 
-def run(env: MaplessRaceEnv40, ctrl, m: str, s0: float, seed: int, laps_target: int):
-    obs, _ = env.reset(seed=seed, options={"map": m, "s0": s0, "lat": 0.0, "dyaw": 0.0, "v0": 1.5})
+def run(env: MaplessRaceEnv40, ctrl, m: str, s0: float, seed: int, laps_target: int, n_obs: int = 0):
+    obs, _ = env.reset(seed=seed, options={"map": m, "s0": s0, "lat": 0.0, "dyaw": 0.0, "v0": 1.5,
+                                           "n_obstacles": n_obs})
     xs, ys, vs = [], [], []
     while True:
         obs, _, term, trunc, info = env.step(ctrl(obs, env))
@@ -123,6 +124,8 @@ def plot(env, m, xs, ys, vs, out: Path, title: str):
     fig, ax = plt.subplots(figsize=(7, 7))
     ax.imshow(~g.occ, cmap="gray", extent=ext, origin="upper", vmin=0, vmax=1, alpha=0.6)
     ax.plot(tr.line.x, tr.line.y, lw=0.6, color="tab:orange", label="raceline (privileged)")
+    for cx, cy, r in env.obstacles:
+        ax.add_patch(plt.Circle((cx, cy), r, color="#d62728", zorder=5))
     sc = ax.scatter(xs, ys, c=vs, s=3, cmap="viridis", vmin=0, vmax=7)
     fig.colorbar(sc, ax=ax, label="speed [m/s]", shrink=0.7)
     pad = 3
@@ -142,6 +145,7 @@ def main():
     p.add_argument("--max-s", type=float, default=120.0)
     p.add_argument("--out", default="eval_out")
     p.add_argument("--no-noise", action="store_true")
+    p.add_argument("--obstacles", type=int, default=0, help="트랙 위 장애물 개수 (0 = 없음)")
     a = p.parse_args()
 
     cfg = EnvConfig(max_episode_s=a.max_s)
@@ -156,12 +160,12 @@ def main():
     rows = []
     for t in env.tracks:
         for k in range(a.spawns):
-            info, xs, ys, vs = run(env, ctrl, t.name, t.line.length * k / a.spawns, 100 + k, a.laps)
+            info, xs, ys, vs = run(env, ctrl, t.name, t.line.length * k / a.spawns, 100 + k, a.laps, a.obstacles)
             best = min(info["lap_times"]) if info["lap_times"] else None
-            rows.append(dict(map=t.name, spawn=k, laps=info["laps"], best_lap=best,
+            rows.append(dict(map=t.name, spawn=k, obstacles=a.obstacles, laps=info["laps"], best_lap=best,
                              progress=round(info["progress"], 3), collided=info["collided"],
                              v_mean=round(float(vs.mean()), 2), sim_t=round(info["t"], 1)))
-            print(f"{name:14s} {t.name:12s} spawn{k} laps={info['laps']} best_lap={best} "
+            print(f"{name:14s} {t.name:12s} spawn{k} obs={a.obstacles} laps={info['laps']} best_lap={best} "
                   f"prog={info['progress']:.2f} crash={info['collided']} v̄={vs.mean():.2f}")
             if k == 0:
                 plot(env, t.name, xs, ys, vs, out / f"{name}_{t.name}.png",

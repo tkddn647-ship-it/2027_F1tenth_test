@@ -96,6 +96,9 @@ class MaplessRaceEnv40(gym.Env):
         if c.mu is not None:
             self.base_params.mu = c.mu
         self.track: Track | None = None
+        self.obstacles = np.zeros((0, 3))
+        self.obs_s = np.zeros(0)
+        self.obs_lat = np.zeros(0)
 
     # ------------------------------------------------------------------ utils
     def _footprint_hit(self, x: float, y: float, yaw: float) -> bool:
@@ -106,10 +109,18 @@ class MaplessRaceEnv40(gym.Env):
         cy, sy = np.cos(yaw), np.sin(yaw)
         px = x + lx * cy - ly * sy
         py = y + lx * sy + ly * cy
-        return bool(self.track.grid.occupied(px, py).any())
+        if self.track.grid.occupied(px, py).any():
+            return True
+        ob = getattr(self, "obstacles", None)
+        if ob is not None and len(ob):
+            d2 = (px[:, None] - ob[None, :, 0]) ** 2 + (py[:, None] - ob[None, :, 1]) ** 2
+            if (d2 < ob[None, :, 2] ** 2).any():
+                return True
+        return False
 
     def _raw_scan(self) -> np.ndarray:
-        raw = self.lidar.scan(self.state[0], self.state[1], self.state[4], noise=self.sensor_noise)
+        raw = self.lidar.scan(self.state[0], self.state[1], self.state[4], noise=self.sensor_noise,
+                              obstacles=self.obstacles)
         sp = self.cfg.lidar
         return preprocess_scan(raw, -sp.fov / 2.0, sp.angle_inc, sp)
 
@@ -120,12 +131,47 @@ class MaplessRaceEnv40(gym.Env):
         v_ref = float(line.at_s(self.s, line.v_ref))
         kap, vr = line.lookahead(self.s)
         e_psi = line.heading_error(self.line_idx, self.state[4])
+        # 앞 10 m 안 가장 가까운 장애물: (거리/10, 라인 기준 옆 위치 − 내 e_y, 반지름/0.3). 없으면 (1, 0, 0)
+        ob_feat = [1.0, 0.0, 0.0]
+        if len(self.obstacles):
+            ds = (self.obs_s - self.s) % line.length
+            j = int(np.argmin(ds))
+            if ds[j] < 10.0:
+                ob_feat = [ds[j] / 10.0, float(np.clip(self.obs_lat[j] - self.e_y, -3, 3)),
+                           self.obstacles[j, 2] / 0.3]
         p = np.concatenate([
             [np.clip(self.e_y, -3, 3), e_psi, (v - v_ref) / c.norm.v_scale, np.clip(self.state[6], -1, 1)],
             np.clip(kap, -3, 3),
             vr / c.norm.v_scale,
+            ob_feat,
         ]).astype(np.float32)
         return p
+
+    def _place_obstacles(self, n: int, s_spawn: float) -> None:
+        """레이싱라인 근처에 원 장애물 n 개. 한쪽은 min_gap 이상 지나갈 틈을 남긴다."""
+        from .raycast import cast_rays
+        oc = self.cfg.obstacles
+        line, grid = self.track.line, self.track.grid
+        obs, ss, lats = [], [], []
+        for _ in range(60 * max(n, 1)):
+            if len(obs) >= n:
+                break
+            s_o = (s_spawn + self.rng.uniform(oc.min_ahead, line.length - 3.0)) % line.length
+            if any(abs(line.ds_wrap(s_o, q)) < oc.min_sep for q in ss):
+                continue
+            r = float(self.rng.uniform(*oc.r_range))
+            lat = float(self.rng.uniform(-oc.lat_range, oc.lat_range))
+            i = int(round(s_o / line.ds)) % line.n
+            psi = line.psi[i]
+            cx, cy = line.x[i] - lat * np.sin(psi), line.y[i] + lat * np.cos(psi)
+            if float(grid.distance(np.array([cx]), np.array([cy]))[0]) < r + 0.05:
+                continue
+            side = cast_rays(grid, cx, cy, psi, np.array([np.pi / 2, -np.pi / 2]), 5.0)
+            if (side - r).max() < oc.min_gap:
+                continue
+            obs.append([cx, cy, r]); ss.append(s_o); lats.append(lat)
+        self.obstacles = np.array(obs, dtype=np.float64).reshape(-1, 3)
+        self.obs_s = np.array(ss); self.obs_lat = np.array(lats)
 
     # ------------------------------------------------------------------ reset
     def reset(self, *, seed: int | None = None, options: dict | None = None):
@@ -148,6 +194,7 @@ class MaplessRaceEnv40(gym.Env):
         if self.randomize and c.a_lat_cap_rand > 0:
             self.a_lat_cap *= float(self.rng.uniform(1 - c.a_lat_cap_rand, 1 + c.a_lat_cap_rand))
 
+        self.obstacles = np.zeros((0, 3))
         for _ in range(100):
             s0 = float(options.get("s0", self.rng.uniform(0, line.length)))
             lat = float(options.get("lat", np.clip(self.rng.normal(0, c.spawn_lat_std), -0.4, 0.4)))
@@ -163,6 +210,16 @@ class MaplessRaceEnv40(gym.Env):
             options = {k: v for k, v in options.items() if k not in ("s0", "lat")}
         v0 = float(options.get("v0", self.rng.uniform(*c.spawn_v_range)))
         self.state = np.array([x, y, 0.0, v0, yaw, 0.0, 0.0], dtype=np.float64)
+
+        oc = c.obstacles
+        if "n_obstacles" in options:
+            n_ob = int(options["n_obstacles"])
+        else:
+            n_ob = int(self.rng.integers(1, oc.max_n + 1)) if self.rng.random() < oc.prob else 0
+        self.obstacles = np.zeros((0, 3)); self.obs_s = np.zeros(0); self.obs_lat = np.zeros(0)
+        s_spawn = float(line.project(x, y, None)[1])
+        if n_ob > 0:
+            self._place_obstacles(n_ob, s_spawn)
 
         dt = c.timing.phys_dt
         self.servo = ServoModel(c.act, dt, 0.0)
@@ -186,7 +243,8 @@ class MaplessRaceEnv40(gym.Env):
 
         self.hist.reset(self._raw_scan(), v0, 0.0, self.cmd)
         obs = self.hist.observation(self._priv())
-        return obs, {"map": self.track.name, "line_file": self.track.line_file}
+        return obs, {"map": self.track.name, "line_file": self.track.line_file,
+                     "obstacles": self.obstacles.copy()}
 
     def _footprint_hit_pose(self, x, y, yaw) -> bool:
         return self._footprint_hit(x, y, yaw)
@@ -282,6 +340,7 @@ class MaplessRaceEnv40(gym.Env):
             "e_y": self.e_y, "slip": float(self.state[6]), "yaw_rate": float(self.state[5]),
             "steer": float(self.state[2]), "t": self.t, "dt_tick": dt_tick,
             "x": float(self.state[0]), "y": float(self.state[1]), "yaw": float(self.state[4]),
+            "n_obstacles": int(len(self.obstacles)),
         }
         return obs, float(rew), terminated, truncated, info
 
