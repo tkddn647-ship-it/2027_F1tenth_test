@@ -847,6 +847,7 @@ critic: [192 ; 32 ; p 24 ; a 2] = 250 → 256 → 256 → Q
 | `mapless40/train.py` · `evaluate.py` · `export.py` | 학습 · 평가/궤적 PNG · TorchScript/ONNX 내보내기 |
 | `mapless40/ros_node.py` | Jetson ROS2 노드 (`/scan` 콜백 = 제어 1회, 맵·인터넷 불필요) |
 | `mapless40/tests.py` | numpy 테스트 + (torch 있으면) 정책·커넥톰 테스트 |
+| `mapless40/viz_encoder.py` | CNN 입력(1D 스캔 행렬 / BEV 이미지)과 층별 출력 시각화, numpy 만으로 동작 |
 
 ### 12.1 순서
 
@@ -869,6 +870,10 @@ python -m mapless40.train ... --encoder bev
 
 # ④ 평가 (학습에 안 쓴 맵 포함, 궤적 PNG → eval_out/)
 python -m mapless40.evaluate --model runs/mapless40_conv1d_<시각>/best_model.zip --maps Budapest,ifac,Spielberg
+
+# ⑤' 학습 없이 CNN 입력/출력 그림 보기 (numpy 만, torch 불필요) → viz_out/
+python -m mapless40.viz_encoder --map ifac                 # 학습 전 랜덤 가중치
+python -m mapless40.viz_encoder --map ifac --model runs/mapless40_conv1d_<시각>/best_model.zip   # 학습 후
 
 # ⑤ 내보내기 → Jetson 에 actor.ts.pt + actor_meta.json 두 파일만 복사
 python -m mapless40.export runs/mapless40_conv1d_<시각>/best_model.zip --onnx
