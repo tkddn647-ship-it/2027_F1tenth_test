@@ -124,8 +124,8 @@ class NumpyActor:
         xp = np.pad(x, ((0, 0), (0, 0), (pad, pad)))
         Lo = (L + 2 * pad - k) // stride + 1
         idx = np.arange(Lo)[:, None] * stride + np.arange(k)[None, :]
-        cols = xp[:, :, idx]                                   # (N, C, Lo, K)
-        return np.einsum("nclk,ock->nol", cols, w, optimize=True) + b[None, :, None]
+        cols = xp[:, :, idx].transpose(0, 1, 3, 2).reshape(n, c * k, Lo)   # (N, C·K, Lo)
+        return np.matmul(w.reshape(o, c * k)[None], cols) + b[None, :, None]
 
     def __call__(self, obs, env=None) -> np.ndarray:
         scan = np.asarray(obs["scan"], np.float32)             # (T, N)

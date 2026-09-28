@@ -36,8 +36,9 @@ import numpy as np
 
 
 def main():
+    import os
+
     import rclpy
-    import torch
     from ackermann_msgs.msg import AckermannDriveStamped
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -71,16 +72,34 @@ def main():
             self.declare_parameter("front_check", True)
             self.declare_parameter("check_scans", 40)
 
-            meta = json.loads(open(self.get_parameter("meta").value, encoding="utf-8").read())
+            meta_path = self.get_parameter("meta").value
+            if meta_path and os.path.exists(meta_path):
+                meta = json.loads(open(meta_path, encoding="utf-8").read())
+            else:                                   # zip 만 있을 때: 학습 기본 설정값
+                from .config import EnvConfig
+                c = EnvConfig().to_dict()
+                meta = {"lidar": c["lidar"], "norm": c["norm"], "act": c["act"],
+                        "action": c["action"], "hist": c["timing"]["hist"]}
+                self.get_logger().warn(f"meta 파일 없음({meta_path}) → config.py 기본값 사용")
             self.lidar = LidarSpec(**meta["lidar"])
             self.norm = NormSpec(**meta["norm"])
             self.act = ActuatorSpec(**meta["act"])
             self.action = ActionSpec(**meta["action"])
             self.hist_len = int(meta["hist"])
 
-            dev = self.get_parameter("device").value
-            self.device = torch.device(dev if (dev != "cuda" or torch.cuda.is_available()) else "cpu")
-            self.model = torch.jit.load(self.get_parameter("model").value, map_location=self.device).eval()
+            model_path = self.get_parameter("model").value
+            if model_path.endswith(".zip"):         # SB3 zip 을 torch 없이 바로 (conv1d)
+                from .np_actor import NumpyActor
+                self.np_actor = NumpyActor(model_path)
+                self.device = "numpy"
+                self.get_logger().info(f"numpy actor ← {model_path} (step {self.np_actor.num_timesteps:,})")
+            else:
+                import torch
+                self.torch = torch
+                self.np_actor = None
+                dev = self.get_parameter("device").value
+                self.device = torch.device(dev if (dev != "cuda" or torch.cuda.is_available()) else "cpu")
+                self.model = torch.jit.load(model_path, map_location=self.device).eval()
             self.max_speed = float(self.get_parameter("max_speed").value)
             self.imu_hdr = bool(self.get_parameter("imu_use_header_stamp").value)
             self.scan_hdr = bool(self.get_parameter("scan_use_header_stamp").value)
@@ -213,10 +232,14 @@ def main():
                 return
 
             obs = self.hist.observation()
-            with torch.no_grad():
-                s = torch.from_numpy(obs["scan"].astype(np.float32))[None].to(self.device)
-                st = torch.from_numpy(obs["state"])[None].to(self.device)
-                a = self.model(s, st)[0].cpu().numpy()
+            if self.np_actor is not None:
+                a = self.np_actor(obs)
+            else:
+                torch = self.torch
+                with torch.no_grad():
+                    s = torch.from_numpy(obs["scan"].astype(np.float32))[None].to(self.device)
+                    st = torch.from_numpy(obs["state"])[None].to(self.device)
+                    a = self.model(s, st)[0].cpu().numpy()
             steer, v_cmd = action_to_command(a, self.act, self.action)
             v_cmd = min(v_cmd, self.max_speed)
             out = AckermannDriveStamped()

@@ -52,7 +52,13 @@ class Track:
 
 def load_track(name: str, cfg: EnvConfig) -> Track:
     y = _resolve_map_yaml(name)
-    occ, res, origin, _ = _load_occupancy(y)
+    occ, res, origin, meta = _load_occupancy(y)
+    if str(meta.get("mode", "")).lower() == "trinary":
+        # Cartographer 저장 맵: 254 = 빈칸, 205 = 미탐색, 0 = 벽.  미탐색을 빈칸으로 두면
+        # 트랙 안쪽 섬·바깥이 뚫린 걸로 보여 라인이 벽을 가로지른다 → 빈칸만 주행 가능.
+        from PIL import Image
+        img = np.asarray(Image.open(y.parent / meta["image"]).convert("L"))
+        occ = img < 250
     grid = GridMap(occ, res, origin)
     a = cfg.act
     if a.brake_enabled:

@@ -920,6 +920,33 @@ Roboracer-2026-main 과 맞춘 것:
 - `/scan` 원본을 구독한다 (`scan_rate_adapter` 쓰지 말 것). e-stop·AEB 는 기존 노드 그대로.
 - 2초마다 로그: `scan Hz`, IMU/속도 수신 여부, `latency ms`. latency 가 25 ms 보다 충분히 작은지 확인.
 
+### 12.1b 팀 시뮬(f1tenth_gym_ros)에서 돌리기 — Stanley 자리에 mapless 정책
+
+팀 README §7 과 같은 시뮬(gym 브릿지)에 Stanley 대신 이 정책을 넣는다. **torch 없이 학습 zip 을 바로** 쓴다(numpy actor, 1.1 ms/틱).
+
+1. gym 설정 (`f1tenth_gym_ros/config/sim.yaml`, 고친 뒤 `colcon build --packages-select f1tenth_gym_ros`):
+
+| 맵 | `map_path` (확장자 빼고) | `map_img_ext` | `sx` | `sy` | `stheta` | 라인 / 이론 랩 |
+|--|--|--|--|--|--|--|
+| ifac | `<레포>/maps/ifac_roboracer` | `.png` | -6.828 | 1.536 | -0.115 | 40.8 m / 11.0 s |
+| 팀 맵핑 0817 | `<레포>/maps/roboracer_0817` | `.png` | 0.798 | 0.464 | 3.138 | 36.0 m / 10.0 s |
+
+`maps/roboracer_0817` = `Roboracer-2026-main/maps/cartographer_map_20260817_003202` 복사본. 미탐색(205)을 벽으로 바꿈
+(gym 은 128 이하만 벽이라 그대로 두면 섬 안·트랙 밖이 빈칸이 된다). 팀 CSV(`*_centerline.csv`, `raceline.csv`)는 이 맵 좌표와
+안 맞아서 섬 둘레에 직접 찍은 점(`roboracer_0817_centerline.csv`)으로 라인을 만들었다 (시계방향, 팀 CSV 와 같은 방향).
+
+2. 터미널 3개 (레포 루트, `source install/setup.bash` 후):
+
+```bash
+ros2 launch f1tenth_gym_ros gym_bridge_launch.py
+python3 -m mapless40.gym_adapter        # /scan 250 Hz → /mapless/scan 40 Hz, odom → /imu/data·/vehicle/speed_mps
+python3 -m mapless40.ros_node --ros-args -p model:=best_model.zip -p meta:=none \
+    -p scan_topic:=/mapless/scan -p mount_yaw:=0.0 -p front_check:=false
+```
+
+- Stanley·control_node 는 띄우지 않는다 (`/drive` 를 ros_node 가 낸다. gym 은 `/drive` 를 바로 받는다).
+- gym 은 서보·구동 지연이 없는 이상적 차량이라, 여기서 되는 건 "LiDAR·토픽·타이밍 파이프라인 + 트랙 모양에 대한 일반화" 확인이다.
+
 ### 12.2 이 환경에서 확인한 것 (numpy 부분)
 
 | 항목 | 결과 |
