@@ -97,7 +97,13 @@ def model_controller(path: str):
                 st = torch.from_numpy(obs["state"])[None]
                 return m(s, st)[0].numpy()
         return f
-    from stable_baselines3 import SAC
+    try:
+        from stable_baselines3 import SAC
+    except ImportError:                     # torch 없는 PC: numpy 판 actor (conv1d)
+        from .np_actor import NumpyActor
+        act = NumpyActor(str(p))
+        print(f"[eval] torch 없음 → numpy actor 로 평가 (step {act.num_timesteps:,})")
+        return act
     model = SAC.load(str(p), device="cpu")
     return lambda obs, env=None: model.predict(obs, deterministic=True)[0]
 
