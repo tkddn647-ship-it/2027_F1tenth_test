@@ -141,7 +141,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--maps", default="Spielberg,Silverstone,Monza,Catalunya")
     p.add_argument("--eval-maps", default="Budapest")
-    p.add_argument("--encoder", choices=["conv1d", "bev"], default="conv1d")
+    p.add_argument("--encoder", choices=["conv1d", "bev"], default="bev")
     p.add_argument("--timesteps", type=int, default=2_000_000)
     p.add_argument("--n-envs", type=int, default=8)
     p.add_argument("--subproc", action="store_true", help="env 를 프로세스로 병렬 실행")
