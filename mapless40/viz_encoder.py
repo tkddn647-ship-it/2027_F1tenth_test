@@ -124,7 +124,7 @@ def enc1d(scan, W: Weights):
 
 # ------------------------------------------------------------------ BEV (policy.BEVRasterizer 의 numpy 판)
 def bev_raster(scan, state, lidar: LidarSpec, norm: NormSpec, x_min=-1.5, x_max=13.5,
-               y_half=7.5, res=0.1, free_stride=4):
+               y_half=7.5, res=0.1):
     T, N = scan.shape
     H, Wd = int(round((x_max - x_min) / res)), int(round(2 * y_half / res))
     img = np.zeros((T + 1, H, Wd), np.float32)
@@ -155,13 +155,9 @@ def bev_raster(scan, state, lidar: LidarSpec, norm: NormSpec, x_min=-1.5, x_max=
         c, s = np.cos(pth[k]), np.sin(pth[k])
         gx, gy = px[k] + c * lx - s * ly, py[k] + s * lx + c * ly
         put(k, gx[hit[k]], gy[hit[k]])
-    rs = r[T - 1, ::free_stride]
-    ft = np.arange(res / 2, lidar.range_max, res)          # policy.BEVRasterizer 와 동일: 한 칸 간격
-    tt = np.broadcast_to(ft[None, :], (rs.size, ft.size))
-    keep = tt < rs[:, None] - res                          # 벽 한 칸 앞까지만
-    fx = tt * ca[::free_stride, None] + lidar.mount_x
-    fy = tt * sa[::free_stride, None]
-    put(T, fx[keep], fy[keep])
+    from .obs_builder import bev_polar_lut          # policy.BEVRasterizer 와 같은 조회표
+    lb, lrho, lok = bev_polar_lut(lidar, x_min, x_max, y_half, res)
+    img[T] = ((lrho < r[T - 1][lb] - res) & lok).reshape(H, Wd).astype(np.float32)
     return img, dict(x_min=x_min, x_max=x_max, y_half=y_half)
 
 

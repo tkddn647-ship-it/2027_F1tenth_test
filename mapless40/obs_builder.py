@@ -64,6 +64,28 @@ def preprocess_scan(
     return (out / spec.range_max).astype(np.float32)
 
 
+def bev_polar_lut(spec: LidarSpec, x_min: float, x_max: float, y_half: float,
+                  res: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """BEV 빈공간 채널용 조회표: 격자칸 중심 → (빔 번호, 라이다까지 거리, FOV 안 여부). 길이 H·W.
+
+    빈공간 = FOV 안 & 칸 거리 < 그 방향 빔 거리 − res (벽 한 칸 앞까지).
+    빔마다 점을 찍는(scatter) 방식보다 학습 배치에서 훨씬 싸고, 먼 곳에도 구멍이 없다.
+    """
+    H = int(round((x_max - x_min) / res))
+    W = int(round(2 * y_half / res))
+    xs = x_min + (np.arange(H) + 0.5) * res
+    ys = y_half - (np.arange(W) + 0.5) * res
+    X, Y = np.meshgrid(xs, ys, indexing="ij")
+    dx, dy = X - spec.mount_x, Y
+    rho = np.hypot(dx, dy)
+    phi = np.arctan2(dy, dx)
+    half = spec.fov / 2.0
+    beam = np.rint((phi + half) / spec.angle_inc).astype(np.int64)
+    valid = (np.abs(phi) <= half) & (rho < spec.range_max)
+    beam = np.clip(beam, 0, spec.n_beams - 1)
+    return beam.reshape(-1), rho.reshape(-1).astype(np.float32), valid.reshape(-1)
+
+
 def invalid_bins(ranges: np.ndarray, angle_min: float, angle_increment: float,
                  mount_yaw: float, n_bins: int = 36, near: float = 0.35) -> np.ndarray:
     """차량 기준 각도 n_bins 칸별 '무효 빔' 비율 (0~1). 칸 0 = −180°.

@@ -63,22 +63,24 @@ class BEVRasterizer(nn.Module):
 
     def __init__(self, lidar: LidarSpec, norm: NormSpec, hist: int,
                  x_min: float = -1.5, x_max: float = 13.5, y_half: float = 7.5,
-                 res: float = 0.1, free_stride: int = 4):
+                 res: float = 0.1):
         super().__init__()
         half = lidar.fov / 2.0
         ang = torch.linspace(-half, half, lidar.n_beams)
         self.register_buffer("cos_a", torch.cos(ang), persistent=False)
         self.register_buffer("sin_a", torch.sin(ang), persistent=False)
-        # 빈공간: 빔을 따라 격자 한 칸(res) 간격으로 칠한다 (개수 고정 샘플이면 먼 곳에 구멍이 생김)
-        ft = torch.arange(res / 2, lidar.range_max, res, dtype=torch.float32)
-        self.register_buffer("free_t", ft, persistent=False)
+        # 빈공간: 격자칸 → (빔 번호, 거리) 조회표로 한 번에 판정 (gather, 배치 학습에서 빠름)
+        from .obs_builder import bev_polar_lut
+        lut_b, lut_rho, lut_ok = bev_polar_lut(lidar, x_min, x_max, y_half, res)
+        self.register_buffer("lut_beam", torch.from_numpy(lut_b), persistent=False)
+        self.register_buffer("lut_rho", torch.from_numpy(lut_rho), persistent=False)
+        self.register_buffer("lut_ok", torch.from_numpy(lut_ok), persistent=False)
         self.range_max, self.mount_x = lidar.range_max, lidar.mount_x
         self.v_scale, self.w_scale, self.dt_nom = norm.v_scale, norm.w_scale, norm.dt_nominal
         self.hist, self.x_min, self.y_half, self.res = hist, x_min, y_half, res
         self.H = int(round((x_max - x_min) / res))
         self.W = int(round(2 * y_half / res))
         self.C = hist + 1
-        self.free_stride = free_stride
 
     def _cells(self, x: torch.Tensor, y: torch.Tensor, ch: int) -> torch.Tensor:
         """좌표 → 평탄화 인덱스 (범위 밖은 쓰레기칸 C·H·W)."""
@@ -124,19 +126,13 @@ class BEVRasterizer(nn.Module):
             idx = self._cells(gx, gy, k)
             idx = torch.where(hit[:, k], idx, torch.full_like(idx, self.C * self.H * self.W))
             idx_all.append(idx)
-        # 빈공간 채널 (최신 프레임, 빔을 따라 샘플)
-        rs = r[:, T - 1, ::self.free_stride]                   # (B, N')
-        ca, sa = self.cos_a[::self.free_stride], self.sin_a[::self.free_stride]
-        tt = self.free_t[None, None, :]                        # (1, 1, S)
-        fx = (tt * ca[None, :, None] + self.mount_x).expand(b, -1, -1).reshape(b, -1)
-        fy = (tt * sa[None, :, None]).expand(b, -1, -1).reshape(b, -1)
-        before_hit = (tt < rs[:, :, None] - self.res).reshape(b, -1)   # 벽 한 칸 앞까지만
-        fidx = self._cells(fx, fy, T)
-        idx_all.append(torch.where(before_hit, fidx, torch.full_like(fidx, self.C * self.H * self.W)))
-
         idx = torch.cat(idx_all, dim=1)
         img = torch.zeros(b, self.C * self.H * self.W + 1, device=scan.device)
         img.scatter_(1, idx, 1.0)
+        # 빈공간 채널 (최신 프레임): 칸 거리 < 그 방향 빔 거리 − res
+        r_cell = r[:, T - 1].index_select(1, self.lut_beam)            # (B, H·W)
+        free = (self.lut_rho[None] < r_cell - self.res) & self.lut_ok[None]
+        img[:, T * self.H * self.W:self.C * self.H * self.W] = free.float()
         return img[:, :-1].reshape(b, self.C, self.H, self.W)
 
 

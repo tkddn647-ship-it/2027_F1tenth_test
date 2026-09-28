@@ -123,9 +123,19 @@ class TimeLimitCallback(BaseCallback):
     def __init__(self, minutes: float):
         super().__init__()
         self.deadline = time.time() + minutes * 60 if minutes > 0 else None
+        self._t, self._n = time.time(), None
 
     def _on_step(self) -> bool:
-        if self.deadline and time.time() > self.deadline:
+        now = time.time()
+        if self._n is None:
+            self._t, self._n = now, self.num_timesteps
+        elif now - self._t >= 60.0:          # SB3 fps 는 누적 평균이라 지금 속도를 따로 찍는다
+            rate = (self.num_timesteps - self._n) / (now - self._t)
+            left = getattr(self.model, "_total_timesteps", 0) - self.num_timesteps
+            eta = f", 남은 {left / max(rate, 1e-6) / 3600:.1f} h" if left > 0 else ""
+            print(f"[speed] 최근 1분 {rate:.0f} steps/s (step {self.num_timesteps:,}{eta})", flush=True)
+            self._t, self._n = now, self.num_timesteps
+        if self.deadline and now > self.deadline:
             print("[train] 시간 제한 도달 → 저장 후 종료", flush=True)
             return False
         return True
