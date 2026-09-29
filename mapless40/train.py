@@ -159,9 +159,9 @@ class TimeLimitCallback(BaseCallback):
             self._acc_env = self._acc_upd = 0.0
             self._t, self._n = now, self.num_timesteps
         if self.save_path is not None and now - self._t_save >= self.save_every:
-            self.model.save(str(self.save_path))
             self._t_save = now
-            print(f"[save] step {self.num_timesteps:,} → {self.save_path}.zip", flush=True)
+            if _safe_save(self.model, Path(str(self.save_path) + ".zip")):
+                print(f"[save] step {self.num_timesteps:,} → {self.save_path}.zip", flush=True)
         if self.deadline and now > self.deadline:
             print("[train] 시간 제한 도달 → 저장 후 종료", flush=True)
             return False
@@ -175,11 +175,44 @@ class _PolicyWarmupSAC(SAC):
         return super()._sample_action(0, action_noise, n_envs)
 
 
+def _valid_zip(p: Path) -> bool:
+    import zipfile
+    try:
+        with zipfile.ZipFile(p) as z:
+            return "policy.pth" in z.namelist() and "data" in z.namelist()
+    except Exception:
+        return False
+
+
+def _safe_save(model, path: Path) -> bool:
+    """임시 파일에 저장 → 열어서 확인 → 교체.  실패해도 기존 파일은 그대로, 학습도 안 멈춘다."""
+    import os
+    tmp = path.with_name(path.stem + ".tmp.zip")
+    try:
+        model.save(str(tmp))
+        if not _valid_zip(tmp):
+            raise RuntimeError("저장된 zip 이 열리지 않음")
+        os.replace(tmp, path)
+        return True
+    except Exception as e:  # pragma: no cover
+        print(f"[save] 실패 (기존 {path.name} 유지): {e}", flush=True)
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+        return False
+
+
 def _find_resume(save_dir: Path) -> Path | None:
-    """save_dir 안에서 가장 최근 모델(last_model 또는 최신 체크포인트)을 찾는다."""
+    """save_dir 안에서 가장 최근 **정상** 모델(last_model 또는 체크포인트). 깨진 zip 은 건너뛴다."""
     cands = list((save_dir / "checkpoints").glob("*.zip")) + [save_dir / "last_model.zip"]
-    cands = [c for c in cands if c.exists()]
-    return max(cands, key=lambda c: c.stat().st_mtime) if cands else None
+    cands = sorted((c for c in cands if c.exists() and not c.name.endswith(".tmp.zip")),
+                   key=lambda c: c.stat().st_mtime, reverse=True)
+    for c in cands:
+        if _valid_zip(c):
+            return c
+        print(f"[train] 깨진 파일 건너뜀: {c}")
+    return None
 
 
 def main():
@@ -286,8 +319,8 @@ def main():
     try:
         model.learn(total_timesteps=args.timesteps, callback=cbs, reset_num_timesteps=reset_ts)
     finally:
-        model.save(str(save_dir / "last_model"))
-        print(f"[train] saved {save_dir / 'last_model.zip'}")
+        if _safe_save(model, save_dir / "last_model.zip"):
+            print(f"[train] saved {save_dir / 'last_model.zip'}")
 
     best = save_dir / "best_model.zip"
     try:
