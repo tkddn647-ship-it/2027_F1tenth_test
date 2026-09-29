@@ -11,6 +11,7 @@ LiDAR 인코더 두 종류 (--encoder):
   conv1d : 프레임마다 Conv1d×3 → 48, 4장 concat → 192          (range view, 기준선)
   bev    : IMU·속도로 4프레임을 현재 차 기준에 정렬해 150×150 격자에 찍고
            (프레임별 점유 4ch + 최신 프레임 빈공간 1ch) → Conv2d×4 → 192
+  both   : conv1d 192 ‖ bev 192 → 384  (코랩 T4 에선 conv1d 대비 약 10배 느림)
 
 배포되는 건 actor 뿐 → priv 는 actor 에 절대 들어가지 않는다 (make_actor 참고).
 """
@@ -29,19 +30,27 @@ from .config import PRIV_DIM, LidarSpec, NormSpec
 
 
 # --------------------------------------------------------------------------- 1D
+from .policy_spec import CONV1D_LAYERS  # (out_ch, kernel, stride, pad), viz_encoder 와 공유
+
+
 class ScanEncoder1D(nn.Module):
-    """(B, T, N) → (B, T·out_dim).  프레임마다 같은 가중치."""
+    """(B, T, N) → (B, T·out_dim).  프레임마다 같은 가중치.
+
+    1125 → 375 → 125 → 63.  예전 (32·64·64, stride 2·2·2, 1125→563→282→141) 은
+    학습 업데이트 1회에 약 130 GFLOP 라 코랩 T4 에서 15 steps/s 밖에 안 나왔다 → 연산 약 1/6.
+    첫 층 커널 7(빔 7개 = 1.7°)이 빔을 전부 덮으므로 0.24° 빔을 버리지 않는다.
+    """
 
     def __init__(self, n_beams: int, hist: int, out_dim: int = 48):
         super().__init__()
         self.hist, self.n_beams, self.out_dim = hist, n_beams, out_dim
-        self.conv = nn.Sequential(
-            nn.Conv1d(1, 32, 5, stride=2, padding=2), nn.ReLU(),
-            nn.Conv1d(32, 64, 5, stride=2, padding=2), nn.ReLU(),
-            nn.Conv1d(64, 64, 5, stride=2, padding=2), nn.ReLU(),
-        )
+        layers, c_in = [], 1
+        for c_out, k, s, p in CONV1D_LAYERS:
+            layers += [nn.Conv1d(c_in, c_out, k, stride=s, padding=p), nn.ReLU()]
+            c_in = c_out
+        self.conv = nn.Sequential(*layers)
         with torch.no_grad():
-            L = self.conv(torch.zeros(1, 1, n_beams)).shape[-1]     # 1125 → 141
+            L = self.conv(torch.zeros(1, 1, n_beams)).shape[-1]     # 1125 → 63
         k = max(1, L // 8)
         self.pool = nn.AvgPool1d(k, stride=k)                      # ONNX 친화 (adaptive 대신)
         with torch.no_grad():
@@ -62,21 +71,24 @@ class BEVRasterizer(nn.Module):
 
     def __init__(self, lidar: LidarSpec, norm: NormSpec, hist: int,
                  x_min: float = -1.5, x_max: float = 13.5, y_half: float = 7.5,
-                 res: float = 0.1, free_samples: int = 16, free_stride: int = 3):
+                 res: float = 0.1):
         super().__init__()
         half = lidar.fov / 2.0
         ang = torch.linspace(-half, half, lidar.n_beams)
         self.register_buffer("cos_a", torch.cos(ang), persistent=False)
         self.register_buffer("sin_a", torch.sin(ang), persistent=False)
-        fr = (torch.arange(free_samples, dtype=torch.float32) + 0.5) / free_samples
-        self.register_buffer("free_frac", fr, persistent=False)
+        # 빈공간: 격자칸 → (빔 번호, 거리) 조회표로 한 번에 판정 (gather, 배치 학습에서 빠름)
+        from .obs_builder import bev_polar_lut
+        lut_b, lut_rho, lut_ok = bev_polar_lut(lidar, x_min, x_max, y_half, res)
+        self.register_buffer("lut_beam", torch.from_numpy(lut_b), persistent=False)
+        self.register_buffer("lut_rho", torch.from_numpy(lut_rho), persistent=False)
+        self.register_buffer("lut_ok", torch.from_numpy(lut_ok), persistent=False)
         self.range_max, self.mount_x = lidar.range_max, lidar.mount_x
         self.v_scale, self.w_scale, self.dt_nom = norm.v_scale, norm.w_scale, norm.dt_nominal
         self.hist, self.x_min, self.y_half, self.res = hist, x_min, y_half, res
         self.H = int(round((x_max - x_min) / res))
         self.W = int(round(2 * y_half / res))
         self.C = hist + 1
-        self.free_stride = free_stride
 
     def _cells(self, x: torch.Tensor, y: torch.Tensor, ch: int) -> torch.Tensor:
         """좌표 → 평탄화 인덱스 (범위 밖은 쓰레기칸 C·H·W)."""
@@ -122,17 +134,13 @@ class BEVRasterizer(nn.Module):
             idx = self._cells(gx, gy, k)
             idx = torch.where(hit[:, k], idx, torch.full_like(idx, self.C * self.H * self.W))
             idx_all.append(idx)
-        # 빈공간 채널 (최신 프레임, 빔을 따라 샘플)
-        rs = r[:, T - 1, ::self.free_stride]                   # (B, N')
-        ca, sa = self.cos_a[::self.free_stride], self.sin_a[::self.free_stride]
-        tt = rs[:, :, None] * self.free_frac                   # (B, N', S)
-        fx = (tt * ca[None, :, None] + self.mount_x).reshape(b, -1)
-        fy = (tt * sa[None, :, None]).reshape(b, -1)
-        idx_all.append(self._cells(fx, fy, T))
-
         idx = torch.cat(idx_all, dim=1)
         img = torch.zeros(b, self.C * self.H * self.W + 1, device=scan.device)
         img.scatter_(1, idx, 1.0)
+        # 빈공간 채널 (최신 프레임): 칸 거리 < 그 방향 빔 거리 − res
+        r_cell = r[:, T - 1].index_select(1, self.lut_beam)            # (B, H·W)
+        free = (self.lut_rho[None] < r_cell - self.res) & self.lut_ok[None]
+        img[:, T * self.H * self.W:self.C * self.H * self.W] = free.float()
         return img[:, :-1].reshape(b, self.C, self.H, self.W)
 
 
@@ -159,6 +167,22 @@ class ScanEncoderBEV(nn.Module):
         return self.fc(self.cnn(img))
 
 
+class ScanEncoderBoth(nn.Module):
+    """1D CNN(거리 배열) 과 BEV 2D CNN(x,y 격자) 을 나란히 돌려 이어 붙인다 → 192 + 192 = 384.
+
+    1D 는 각도별 거리 패턴(틈 방향), BEV 는 공간 모양(장애물·벽 위치)을 맡는다.
+    """
+
+    def __init__(self, lidar: LidarSpec, norm: NormSpec, hist: int):
+        super().__init__()
+        self.d1 = ScanEncoder1D(lidar.n_beams, hist)
+        self.bev = ScanEncoderBEV(lidar, norm, hist)
+        self.features_dim = self.d1.features_dim + self.bev.features_dim
+
+    def forward(self, scan: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+        return torch.cat([self.d1(scan, state), self.bev(scan, state)], dim=1)
+
+
 # ----------------------------------------------------------------- extractor
 class AsymFeatures(BaseFeaturesExtractor):
     """Dict obs → 특징. use_priv=False 면 priv 를 읽지도 않는다 (actor)."""
@@ -175,6 +199,8 @@ class AsymFeatures(BaseFeaturesExtractor):
             enc = ScanEncoder1D(n_beams, hist)
         elif encoder == "bev":
             enc = ScanEncoderBEV(lidar, norm, hist)
+        elif encoder == "both":
+            enc = ScanEncoderBoth(lidar, norm, hist)
         else:
             raise ValueError(f"unknown encoder {encoder}")
         feat = enc.features_dim + state_dim_out + (PRIV_DIM if use_priv else 0)

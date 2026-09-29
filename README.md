@@ -703,15 +703,17 @@ p_n=\Big[e_y,\ e_\psi,\ v_n-v_{\mathrm{ref}}(s_n),\ \beta,\ \{\kappa(s_n+j\Delta
 
 ```math
 \begin{aligned}
-e^{(1)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{1\to32,\;k5,\;s2,\;p2}(d_k)\big) &&\in\mathbb{R}^{32\times563}\\
-e^{(2)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{32\to64,\;k5,\;s2,\;p2}(e^{(1)}_k)\big) &&\in\mathbb{R}^{64\times282}\\
-e^{(3)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{64\to64,\;k5,\;s2,\;p2}(e^{(2)}_k)\big) &&\in\mathbb{R}^{64\times141}\\
-g_k &= \mathrm{flatten}\big(\mathrm{AvgPool}_{\to8}(e^{(3)}_k)\big) &&\in\mathbb{R}^{512}\\
+e^{(1)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{1\to16,\;k7,\;s3,\;p3}(d_k)\big) &&\in\mathbb{R}^{16\times375}\\
+e^{(2)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{16\to32,\;k5,\;s3,\;p2}(e^{(1)}_k)\big) &&\in\mathbb{R}^{32\times125}\\
+e^{(3)}_k &= \mathrm{ReLU}\big(\mathrm{Conv1d}_{32\to64,\;k5,\;s2,\;p2}(e^{(2)}_k)\big) &&\in\mathbb{R}^{64\times63}\\
+g_k &= \mathrm{flatten}\big(\mathrm{AvgPool}_{k7}(e^{(3)}_k)\big) &&\in\mathbb{R}^{576}\\
 z_k &= \mathrm{ReLU}(W_z g_k+b_z) &&\in\mathbb{R}^{48}
 \end{aligned}
 ```
 
-Conv 길이: $\lfloor (L+4-5)/2\rfloor+1$ → $1125\to563\to282\to141$.
+Conv 길이: $\lfloor (L+2p-k)/s\rfloor+1$ → $1125\to375\to125\to63$ (AvgPool k7 → 9칸).
+첫 층 커널 7 이 빔 7개(1.7°)를 덮으며 3칸씩 이동하므로 모든 빔이 입력에 쓰인다.
+예전 구성(32·64·64 채널, stride 2, $1125\to563\to282\to141$)은 학습 업데이트 1회에 약 130 GFLOP 라 코랩 T4 에서 15 steps/s → 연산 약 1/6 로 줄임.
 대안 인코더(`--encoder bev`): IMU·속도로 4프레임을 현재 차 기준에 정렬해 150×150 격자(10 cm)에 찍고 Conv2d×4 → 192.
 
 **② 시간 결합** (평균 금지, 순서 유지)
@@ -849,6 +851,21 @@ critic: [192 ; 32 ; p 24 ; a 2] = 250 → 256 → 256 → Q
 | `mapless40/tests.py` | numpy 테스트 + (torch 있으면) 정책·커넥톰 테스트 |
 | `mapless40/viz_encoder.py` | CNN 입력(1D 스캔 행렬 / BEV 이미지)과 층별 출력 시각화, numpy 만으로 동작 |
 
+### 12.0 노트북이 없으면: 코랩에서 학습
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tkddn647-ship-it/2027_F1tenth_test/blob/feat/mapless40-asym-sac/mapless40/colab_train.ipynb)
+
+`mapless40/colab_train.ipynb` — 무료 T4 GPU, 체크포인트는 구글 드라이브에 저장, 세션이 끊기면 `--resume auto` 로 이어 학습.
+테스트 → 기준선 → 학습 → 학습 곡선 → 평가 → CNN 시각화 → Jetson 용 파일 다운로드까지 셀 순서대로.
+
+> **인코더 기본값 = `conv1d`:** 1D CNN(거리 배열 4×1125 → 192) → MLP. `--encoder both`(1D ‖ BEV 2D CNN 5×150×150 → 384)와 `bev` 도 그대로 있지만
+> 2D CNN 이 붙으면 코랩 T4 에서 느려서(both: 업데이트 중 약 85 steps/s, 100만 스텝 3시간+) 노트북 확보 후 쓴다.
+> **장애물:** 학습 에피소드 70%에 원통 장애물 1~3개(반지름 0.12~0.3 m, 한쪽 통과 폭 ≥ 0.8 m). LiDAR 에 찍히고 부딪히면 충돌.
+> critic 은 앞 10 m 안 장애물 위치를 privileged 로 본다 (priv 27). `evaluate --obstacles N` 으로 평가.
+>
+> **현재 기본값 = 간단 버전:** 속도 2~5 m/s, 기준 라인은 레이싱라인(센터라인만 있는 맵은 최소곡률 라인),
+> 모르는 값(서보·구동 지연, 가속·코너 한계)은 실차보다 불리한 쪽으로 잡음. ifac: 이론 11.0 s, pure pursuit 11.5 s, FTG 18.0 s.
+
 ### 12.1 순서
 
 ```powershell
@@ -880,15 +897,55 @@ python -m mapless40.export runs/mapless40_conv1d_<시각>/best_model.zip --onnx
 python -m mapless40.evaluate --model runs/mapless40_conv1d_<시각>/actor.ts.pt --maps ifac   # 배포 파일로 재확인
 ```
 
-Jetson (ROS2, 레포 루트에서):
+Jetson (ROS2, 레포 루트에서). 먼저 Roboracer 스택의 센서·제어 노드를 띄운다
+(sllidar **40 Hz**, ebimu_driver, sensor_static_tf, control_node AUTO. Cartographer·Stanley 는 필요 없음):
 
 ```bash
-python3 -m mapless40.ros_node --ros-args -p model:=actor.ts.pt -p meta:=actor_meta.json \
-  -p max_speed:=2.0 -p mount_yaw:=0.0
+python3 -m mapless40.ros_node --ros-args -p model:=actor.ts.pt -p meta:=actor_meta.json -p max_speed:=2.5
 ```
 
+Roboracer-2026-main 과 맞춘 것:
+
+| 항목 | 스택 실제 값 | 노드 |
+|--|--|--|
+| `/scan` | sllidar_node, 한 바퀴 360° 전체, angle = π − raw, `angle_compensate=false` → 점 수가 회전마다 조금씩 다름 | 각도 기준으로 0.24° 격자 1125칸에 재배치 (점 수 무관) |
+| 빔 수 | 60 kHz / 40 Hz = 1500점/360° = 0.24° → 270° 안 1125 | 학습 격자 1125 (20 Hz 로 켜면 2250점 → 같은 격자로 min-pool, 대신 주기 경고) |
+| 라이다 방향 | TF `base_link→laser` (`sensor_static_tf`, `lidar_yaw` 기본 0). 2026-08-15 실측 기록은 **정면 = 스캔 −177°** | `mount_yaw` 미지정이면 TF yaw 사용 + **시작 검사**: 정지 상태 40장으로 차체에 가린 구간이 차 뒤(±180°)인지 확인, 앞이면 명령 안 내고 보정값 출력 |
+| 라이다 위치 | base_link(뒷바퀴축) +0.31 m | sim `mount_x` = 0.31 − l_r 0.171 = 0.139 (CG 기준) |
+| `/imu/data` | ebimu_driver, imu_link 축 = base_link 축, ~95 Hz, header.stamp 는 PLL 10 ms 간격 | `angular_velocity.z`, **header.stamp 사용** (수신 시각은 시리얼 배치로 뭉침), ±8 rad/s 클립 |
+| `/vehicle/speed_mps` | control_node, **Float64**, 50 Hz | Float64 구독 (`speed_msg_type`) |
+| `/drive` | control_node AUTO, 조향 풀스케일 0.3735 rad, +조향 = 좌 | 같은 규약 |
+
+- IMU 가 orientation-only 모드(3필드)면 드라이버가 yaw 차분으로 ω 를 만들어 ±180° 에서 튄다 → **9필드(자이로 포함) 스트림**으로 켤 것.
 - `/scan` 원본을 구독한다 (`scan_rate_adapter` 쓰지 말 것). e-stop·AEB 는 기존 노드 그대로.
-- 첫 시험은 `max_speed:=2.0` 으로 상한을 걸고, 로그의 `latency ms` 가 25 ms 보다 충분히 작은지 확인.
+- 2초마다 로그: `scan Hz`, IMU/속도 수신 여부, `latency ms`. latency 가 25 ms 보다 충분히 작은지 확인.
+
+### 12.1b 팀 시뮬(f1tenth_gym_ros)에서 돌리기 — Stanley 자리에 mapless 정책
+
+팀 README §7 과 같은 시뮬(gym 브릿지)에 Stanley 대신 이 정책을 넣는다. **torch 없이 학습 zip 을 바로** 쓴다(numpy actor, 1.1 ms/틱).
+
+1. gym 설정 (`f1tenth_gym_ros/config/sim.yaml`, 고친 뒤 `colcon build --packages-select f1tenth_gym_ros`):
+
+| 맵 | `map_path` (확장자 빼고) | `map_img_ext` | `sx` | `sy` | `stheta` | 라인 / 이론 랩 |
+|--|--|--|--|--|--|--|
+| ifac | `<레포>/maps/ifac_roboracer` | `.png` | -6.828 | 1.536 | -0.115 | 40.8 m / 11.0 s |
+| 팀 맵핑 0817 | `<레포>/maps/roboracer_0817` | `.png` | 0.798 | 0.464 | 3.138 | 36.0 m / 10.0 s |
+
+`maps/roboracer_0817` = `Roboracer-2026-main/maps/cartographer_map_20260817_003202` 복사본. 미탐색(205)을 벽으로 바꿈
+(gym 은 128 이하만 벽이라 그대로 두면 섬 안·트랙 밖이 빈칸이 된다). 팀 CSV(`*_centerline.csv`, `raceline.csv`)는 이 맵 좌표와
+안 맞아서 섬 둘레에 직접 찍은 점(`roboracer_0817_centerline.csv`)으로 라인을 만들었다 (시계방향, 팀 CSV 와 같은 방향).
+
+2. 터미널 3개 (레포 루트, `source install/setup.bash` 후):
+
+```bash
+ros2 launch f1tenth_gym_ros gym_bridge_launch.py
+python3 -m mapless40.gym_adapter        # /scan 250 Hz → /mapless/scan 40 Hz, odom → /imu/data·/vehicle/speed_mps
+python3 -m mapless40.ros_node --ros-args -p model:=best_model.zip -p meta:=none \
+    -p scan_topic:=/mapless/scan -p mount_yaw:=0.0 -p front_check:=false
+```
+
+- Stanley·control_node 는 띄우지 않는다 (`/drive` 를 ros_node 가 낸다. gym 은 `/drive` 를 바로 받는다).
+- gym 은 서보·구동 지연이 없는 이상적 차량이라, 여기서 되는 건 "LiDAR·토픽·타이밍 파이프라인 + 트랙 모양에 대한 일반화" 확인이다.
 
 ### 12.2 이 환경에서 확인한 것 (numpy 부분)
 
@@ -918,12 +975,11 @@ torch / SB3 부분(`policy.py`, `train.py`, `export.py`)은 이 작업 환경에
 
 | 값 | 기본값 | 측정 방법 |
 |--|--|--|
-| 실제 빔 수 `n_beams` | 1125 | `/scan` 의 `len(ranges)`, `angle_increment` |
-| `mount_yaw` | 0 | 스캔 0° 가 정면인지 (`sensor_static_tf` 의 `lidar_yaw`) |
-| 서보 `servo_dead_time` / `servo_tau` / `servo_rate_max` | 10 ms / 40 ms / 5 rad/s | 조향 step 명령 → IMU 요레이트 응답 |
+| 서보 `servo_dead_time` / `servo_tau` / `servo_rate_max` | 15 ms / 50 ms / 4 rad/s (보수적) | 조향 step 명령 → IMU 요레이트 응답 |
 | 타력 감속 `coast_decel_c0` / `c1` | 0.6 / 0.15 | 지면에서 목표속도를 내리는 step → VESC 속도 로그 |
-| `jerk_max` · `drive_dead_time` | 40 m/s³ · 20 ms | 목표속도 올리는 step |
-| `compute_latency` | 5 ms | 노드 로그 `latency ms` |
+| `accel_max` · `jerk_max` · `drive_dead_time` | 5 m/s² · 40 m/s³ · 30 ms (보수적) | 목표속도 올리는 step |
+| `compute_latency` | 10 ms (보수적) | 노드 로그 `latency ms` |
+| 코너 마찰 한계 `a_lat_cap` | 6 m/s² (보수적) | 원 선회 속도를 올리며 IMU 횡가속 |
 
 값을 바꾸면 sim 과 `actor_meta.json` 이 같이 바뀌어야 하므로 **바꾼 뒤 다시 학습**한다.
 

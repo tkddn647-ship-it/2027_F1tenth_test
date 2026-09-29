@@ -108,6 +108,19 @@ def cast_rays(grid: GridMap, x: float, y: float, yaw: float,
     return t
 
 
+def ray_circles(ox: float, oy: float, th: np.ndarray, circles: np.ndarray, range_max: float) -> np.ndarray:
+    """빔들(원점 공통, 방향 th)과 원 장애물들 [cx, cy, r] 의 첫 교차 거리. 안 맞으면 range_max."""
+    dx, dy = np.cos(th)[:, None], np.sin(th)[:, None]
+    cx, cy, rr = circles[:, 0][None], circles[:, 1][None], circles[:, 2][None]
+    fx, fy = ox - cx, oy - cy
+    b = fx * dx + fy * dy
+    c = fx * fx + fy * fy - rr * rr
+    disc = b * b - c
+    t = -b - np.sqrt(np.maximum(disc, 0.0))
+    t = np.where((disc >= 0) & (t > 0), t, range_max)
+    return np.minimum(t.min(axis=1), range_max)
+
+
 class LidarSim:
     """차량 pose → 노이즈 포함 LaserScan 유사 배열 (실차와 같은 전처리를 거치게 raw 로 반환)."""
 
@@ -116,11 +129,14 @@ class LidarSim:
         self.grid, self.spec, self.rng = grid, spec, rng
         self.angles = beam_angles(spec)
 
-    def scan(self, x: float, y: float, yaw: float, noise: bool = True) -> np.ndarray:
+    def scan(self, x: float, y: float, yaw: float, noise: bool = True,
+             obstacles: np.ndarray | None = None) -> np.ndarray:
         sp = self.spec
         lx = x + sp.mount_x * np.cos(yaw)
         ly = y + sp.mount_x * np.sin(yaw)
         r = cast_rays(self.grid, lx, ly, yaw, self.angles, sp.range_max)
+        if obstacles is not None and len(obstacles):
+            r = np.minimum(r, ray_circles(lx, ly, yaw + self.angles, obstacles, sp.range_max))
         if noise:
             r = r + self.rng.normal(0.0, sp.noise_std, r.size)
             drop = self.rng.random(r.size) < sp.dropout_prob

@@ -64,6 +64,72 @@ def preprocess_scan(
     return (out / spec.range_max).astype(np.float32)
 
 
+def bev_polar_lut(spec: LidarSpec, x_min: float, x_max: float, y_half: float,
+                  res: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """BEV 빈공간 채널용 조회표: 격자칸 중심 → (빔 번호, 라이다까지 거리, FOV 안 여부). 길이 H·W.
+
+    빈공간 = FOV 안 & 칸 거리 < 그 방향 빔 거리 − res (벽 한 칸 앞까지).
+    빔마다 점을 찍는(scatter) 방식보다 학습 배치에서 훨씬 싸고, 먼 곳에도 구멍이 없다.
+    """
+    H = int(round((x_max - x_min) / res))
+    W = int(round(2 * y_half / res))
+    xs = x_min + (np.arange(H) + 0.5) * res
+    ys = y_half - (np.arange(W) + 0.5) * res
+    X, Y = np.meshgrid(xs, ys, indexing="ij")
+    dx, dy = X - spec.mount_x, Y
+    rho = np.hypot(dx, dy)
+    phi = np.arctan2(dy, dx)
+    half = spec.fov / 2.0
+    beam = np.rint((phi + half) / spec.angle_inc).astype(np.int64)
+    valid = (np.abs(phi) <= half) & (rho < spec.range_max)
+    beam = np.clip(beam, 0, spec.n_beams - 1)
+    return beam.reshape(-1), rho.reshape(-1).astype(np.float32), valid.reshape(-1)
+
+
+def invalid_bins(ranges: np.ndarray, angle_min: float, angle_increment: float,
+                 mount_yaw: float, n_bins: int = 36, near: float = 0.35) -> np.ndarray:
+    """차량 기준 각도 n_bins 칸별 '무효 빔' 비율 (0~1). 칸 0 = −180°.
+
+    무효 = 무반사(inf/0/NaN) 또는 near 보다 가까움(차체).  LPX-T1 은 뒤쪽 ~90° 가
+    차체·하우징에 가려 늘 무효라서, 정지 상태 스캔 몇십 장을 평균하면 가장 긴 무효
+    구간의 중심이 차 뒤(±180°)에 와야 한다.  정면(0°) 근처면 라이다 방향 설정이 틀린 것.
+    """
+    r = np.asarray(ranges, dtype=np.float64)
+    bad = ~np.isfinite(r) | (r <= 0.0) | (r < near)
+    ang = angle_min + angle_increment * np.arange(r.size) + mount_yaw
+    ang = (ang + np.pi) % (2.0 * np.pi) - np.pi
+    b = np.clip(((ang + np.pi) / (2 * np.pi) * n_bins).astype(np.int64), 0, n_bins - 1)
+    tot = np.bincount(b, minlength=n_bins).astype(np.float64)
+    nb = np.bincount(b, weights=bad.astype(np.float64), minlength=n_bins)
+    frac = np.ones(n_bins)                     # 빔이 아예 없는 칸 = 무효 (FOV 밖)
+    has = tot > 0
+    frac[has] = nb[has] / tot[has]
+    return frac
+
+
+def blocked_center_deg(frac: np.ndarray, thresh: float = 0.8) -> tuple[float, float]:
+    """invalid_bins 평균 → (가장 긴 연속 무효 구간 중심각 [deg], 폭 [deg]). 없으면 (nan, 0)."""
+    n = frac.size
+    m = frac >= thresh
+    if not m.any():
+        return float("nan"), 0.0
+    if m.all():
+        return float("nan"), 360.0
+    start = int(np.argmin(m))                  # 유효 칸에서 시작해 원형으로 훑음
+    best_len, best_mid, run = 0, 0.0, 0
+    for k in range(1, n + 1):
+        i = (start + k) % n
+        if m[i]:
+            run += 1
+            if run > best_len:
+                best_len, best_mid = run, (start + k) - (run - 1) / 2.0
+        else:
+            run = 0
+    w = 360.0 / n
+    center = ((best_mid % n) + 0.5) * w - 180.0
+    return float((center + 180.0) % 360.0 - 180.0), best_len * w
+
+
 class IntervalAverager:
     """타임스탬프가 붙은 샘플을 쌓고 [t0, t1] 구간 평균(사다리꼴)을 낸다."""
 

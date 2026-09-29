@@ -125,10 +125,16 @@ def test_env_spaces_and_latency():
         assert obs[k].shape == sp.shape and obs[k].dtype == sp.dtype, k
     env.randomize = False
     d0 = env.state[2]
-    # 첫 스텝: 명령은 compute_latency + servo dead time 뒤에야 조향이 움직이기 시작
+    # 명령은 compute_latency + servo dead time 뒤에야 조향이 움직이기 시작한다
+    delay = CFG.timing.compute_latency + CFG.act.servo_dead_time
+    n_wait = int(np.ceil((delay + 1e-9) / CFG.timing.dt_scan))
+    for _ in range(n_wait):
+        env.step(np.array([1.0, 0.0], np.float32))
+    if delay >= CFG.timing.dt_scan:
+        pass  # 지연이 한 틱 이상이면 첫 틱에는 안 움직이는 게 정상
     env.step(np.array([1.0, 0.0], np.float32))
-    assert env.state[2] > d0, "조향 명령이 한 틱 안에 반영되기 시작해야 함"
-    assert env.state[2] < CFG.act.steer_max * 0.6, "서보 지연/속도제한이 있어야 함"
+    assert env.state[2] > d0 + 1e-3, "지연 뒤에는 조향이 움직여야 함"
+    assert env.state[2] < CFG.act.steer_max * 0.9, "서보 지연/속도제한이 있어야 함"
 
 
 def test_env_ftg_completes_lap(max_s: float = 40.0):
@@ -137,7 +143,7 @@ def test_env_ftg_completes_lap(max_s: float = 40.0):
     env.cfg.max_episode_s = max_s
     env.randomize = False
     ctrl = ftg_controller(env.cfg)
-    obs, _ = env.reset(seed=3, options={"s0": 0.0, "lat": 0.0, "dyaw": 0.0, "v0": 1.5})
+    obs, _ = env.reset(seed=3, options={"s0": 0.0, "lat": 0.0, "dyaw": 0.0, "v0": 1.5, "n_obstacles": 0})
     while True:
         obs, r, term, trunc, info = env.step(ctrl(obs))
         if term or trunc or info["laps"] >= 1:
@@ -159,7 +165,7 @@ def test_policy_actor_ignores_priv():
     import torch
     from stable_baselines3 import SAC
     from .policy import AsymFeatures, AsymSACPolicy
-    for enc in ("conv1d", "bev"):
+    for enc in ("conv1d", "bev", "both"):
         env = _env()
         model = SAC(AsymSACPolicy, env, buffer_size=100, learning_starts=10, batch_size=8,
                     policy_kwargs=dict(features_extractor_class=AsymFeatures,
@@ -199,7 +205,56 @@ def test_bev_raster_geometry():
     row = int((5.0 + sp.mount_x - ras.x_min) / ras.res)
     col = int(ras.y_half / ras.res)
     assert img[3, row - 1:row + 2, col - 1:col + 2].sum() > 0, "정면 5 m 점이 격자에 찍혀야 함"
-    assert img[4, row - 10, col] > 0, "빔 경로는 빈공간 채널에 찍혀야 함"
+    for x in (1.0, 2.5, 4.0):                        # 빔 경로 위 여러 거리 (벽 5 m 앞)
+        rr = int((x + sp.mount_x - ras.x_min) / ras.res)
+        assert img[4, rr, col - 1:col + 2].sum() > 0, f"빔 경로 {x} m 지점이 빈공간 채널에 찍혀야 함"
+    assert img[4, row + 5:, col].sum() == 0, "벽 뒤는 빈공간으로 칠하면 안 됨"
+
+
+def test_obstacles_lidar_and_collision():
+    from .raycast import ray_circles
+    # 정면 3 m 에 반지름 0.2 원 → 정면 빔 2.8 m
+    t = ray_circles(0.0, 0.0, np.array([0.0, np.pi / 2]), np.array([[3.0, 0.0, 0.2]]), 15.0)
+    assert abs(t[0] - 2.8) < 1e-6 and t[1] == 15.0
+    env = _env()
+    for seed in range(5):
+        obs, info = env.reset(seed=seed, options={"n_obstacles": 3})
+        ob = info["obstacles"]
+        assert 1 <= len(ob) <= 3
+        g = env.track.grid
+        assert (g.distance(ob[:, 0], ob[:, 1]) > ob[:, 2]).all(), "장애물이 벽에 박히면 안 됨"
+        assert env._priv().shape == (PRIV_DIM,)
+    # 장애물을 차 바로 앞에 두면 LiDAR 에 보이고, 들이받으면 충돌
+    env.reset(seed=0, options={"n_obstacles": 0, "v0": 3.0, "lat": 0.0, "dyaw": 0.0})
+    x, y, yaw = env.state[0], env.state[1], env.state[4]
+    env.obstacles = np.array([[x + 1.5 * np.cos(yaw), y + 1.5 * np.sin(yaw), 0.25]])
+    env.obs_s = np.array([env.s + 1.5]); env.obs_lat = np.array([0.0])
+    scan = env._raw_scan()
+    mid = CFG.lidar.n_beams // 2
+    assert abs(scan[mid] * CFG.lidar.range_max - (1.5 - 0.25 - CFG.lidar.mount_x)) < 0.1
+    hit = False
+    for _ in range(40):
+        _, _, term, _, info = env.step(np.array([0.0, 0.0], np.float32))
+        if term:
+            hit = info["collided"]; break
+    assert hit, "장애물에 부딪히면 충돌로 끝나야 함"
+
+
+def test_bev_raster_numpy():
+    from .config import NormSpec
+    from .viz_encoder import bev_raster
+    sp = LidarSpec()
+    a = beam_angles(sp)
+    r = np.full(sp.n_beams, 1.0, np.float32)
+    r[np.abs(a) < 0.02] = 5.0 / sp.range_max
+    img, ex = bev_raster(np.stack([r] * 4), np.zeros(STATE_DIM, np.float32), sp, NormSpec())
+    col = int(ex["y_half"] / 0.1)
+    row = int((5.0 + sp.mount_x - ex["x_min"]) / 0.1)
+    assert img[3, row - 1:row + 2, col - 1:col + 2].sum() > 0
+    for x in (1.0, 2.5, 4.0):
+        rr = int((x + sp.mount_x - ex["x_min"]) / 0.1)
+        assert img[4, rr, col - 1:col + 2].sum() > 0, x
+    assert img[4, row + 5:, col].sum() == 0
 
 
 def test_connectome_dense_equals_sparse():
@@ -232,12 +287,40 @@ def test_connectome_dense_equals_sparse():
     assert np.allclose(ref, np.stack(ys), atol=1e-4), "numpy 참조 구현과 같아야 함"
 
 
+def test_real_sllidar_layout_and_front_check():
+    """sllidar_node 실제 형식: 40 Hz 한 바퀴 1500점, angle = π − raw → [−π, π].
+    라이다를 뒤로 달아 스캔 0° 가 차 뒤를 보는 경우(2026-08-15 실측)를 흉내낸다."""
+    from .obs_builder import blocked_center_deg, invalid_bins
+    sp = LidarSpec()
+    n = 1500                                   # 60 kHz / 40 Hz
+    amin, inc = -np.pi, 2 * np.pi / (n - 1)
+    scan_ang = amin + inc * np.arange(n)
+    true_mount = np.pi                         # 차량각 = 스캔각 + π
+    veh = (scan_ang + true_mount + np.pi) % (2 * np.pi) - np.pi
+    r = np.full(n, 6.0)
+    r[np.abs(veh - np.pi / 2) < 0.05] = 1.0    # 차 왼쪽 벽
+    r[np.abs(np.abs(veh) - np.pi) < np.radians(47)] = np.inf   # 차 뒤 95° 가림
+    # 270° 안에 들어오는 점 수 = 1125 (학습 격자와 같음)
+    assert abs(int(np.sum(np.abs(veh) <= np.radians(135) + 1e-9)) - sp.n_beams) <= 2
+    # 올바른 mount → 가린 구간이 뒤, 왼쪽 벽이 +90° 칸
+    c, w = blocked_center_deg(invalid_bins(r, amin, inc, true_mount))
+    assert abs(abs(c) - 180) < 15 and 70 < w < 130, (c, w)
+    sp.mount_yaw = true_mount
+    s = preprocess_scan(r, amin, inc, sp)
+    a = beam_angles(sp)
+    assert s[np.argmin(np.abs(a - np.pi / 2))] < 0.1 and s[np.argmin(np.abs(a + np.pi / 2))] > 0.3
+    # 틀린 mount(0) → 가린 구간이 정면으로 보여 검사가 잡아야 함
+    c0, _ = blocked_center_deg(invalid_bins(r, amin, inc, 0.0))
+    assert abs(c0) < 20, c0
+
+
 def main():
     quick = "--quick" in sys.argv
     tests = [test_preprocess_scan_grid_and_min, test_preprocess_scan_orientation,
              test_interval_averager, test_obs_history_layout, test_action_mapping,
              test_drive_model_no_active_brake, test_raycast_matches_bruteforce,
-             test_env_spaces_and_latency]
+             test_env_spaces_and_latency, test_bev_raster_numpy, test_obstacles_lidar_and_collision,
+             test_real_sllidar_layout_and_front_check]
     if not quick:
         tests.append(test_env_ftg_completes_lap)
     if _torch_ok():

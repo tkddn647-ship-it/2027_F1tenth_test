@@ -11,7 +11,7 @@ LiDAR CNN 인코더에 "들어가는 것"과 "나오는 것"을 그림으로 본
 학습 후 --model 로 다시 돌리면 같은 그림에서 무엇을 배웠는지 비교할 수 있다.
 
 산출물:
-  enc1d_<map>.png   1D Conv: 입력 4×1125 → Conv 32×563 → 64×282 → 64×141 → z 4×48
+  enc1d_<map>.png   1D Conv: 입력 4×1125 → Conv 16×375 → 32×125 → 64×63 → z 4×48
   bev_<map>.png     BEV: 입력 5채널(프레임 4 + 빈공간) → Conv2d 16·32·64·64 채널 → 192
   bev_<map>.gif     주행하면서 BEV 입력과 Conv 출력이 바뀌는 모습
 """
@@ -30,7 +30,7 @@ from .obs_builder import beam_angles
 
 
 # ------------------------------------------------------------------ numpy ops
-def conv1d(x, w, b, stride=2, pad=2):
+def conv1d(x, w, b, stride=2, pad=2):  # noqa: D401
     """x (C, L), w (O, C, K) → (O, L')."""
     C, L = x.shape
     O, _, K = w.shape
@@ -70,12 +70,22 @@ def _init(rng, shape):
 class Weights:
     def __init__(self, seed: int = 0, model_zip: str | None = None, n_beams: int = 1125):
         rng = np.random.default_rng(seed)
-        self.c1 = _init(rng, (32, 1, 5)); self.c2 = _init(rng, (64, 32, 5)); self.c3 = _init(rng, (64, 64, 5))
+        from .policy_spec import CONV1D_LAYERS
+        self.c1d_spec = CONV1D_LAYERS
+        c_in, L, ws = 1, n_beams, []
+        for c_out, k, s, p in CONV1D_LAYERS:
+            ws.append(_init(rng, (c_out, c_in, k)))
+            L = (L + 2 * p - k) // s + 1
+            c_in = c_out
+        self.c1, self.c2, self.c3 = ws
+        self.c1d_len = []
         L = n_beams
-        for _ in range(3):
-            L = (L + 4 - 5) // 2 + 1
-        self.pool_k = L // 8
-        self.fc1 = _init(rng, (48, 64 * 8))
+        for c_out, k, s, p in CONV1D_LAYERS:
+            L = (L + 2 * p - k) // s + 1
+            self.c1d_len.append((c_out, L))
+        self.pool_k = max(1, L // 8)
+        self.pool_n = (L - self.pool_k) // self.pool_k + 1      # nn.AvgPool1d(k, k) 출력 길이
+        self.fc1 = _init(rng, (48, c_in * self.pool_n))
         self.b1 = _init(rng, (16, 5, 3, 3)); self.b2 = _init(rng, (32, 16, 3, 3))
         self.b3 = _init(rng, (64, 32, 3, 3)); self.b4 = _init(rng, (64, 64, 3, 3))
         self.fcb = _init(rng, (192, 64 * 5 * 5))
@@ -88,6 +98,9 @@ class Weights:
         from stable_baselines3 import SAC
         sd = SAC.load(model_zip, device="cpu").policy.actor.features_extractor.state_dict()
         g = lambda k: sd[k].numpy()  # noqa: E731
+        # encoder='both' 면 키가 scan_enc.d1.* / scan_enc.bev.* → 단일 인코더 이름으로 맞춤
+        sd = {k.replace("scan_enc.d1.", "scan_enc.").replace("scan_enc.bev.", "scan_enc."): v
+              for k, v in sd.items()}
         if "scan_enc.conv.0.weight" in sd:
             self.c1 = (g("scan_enc.conv.0.weight"), g("scan_enc.conv.0.bias"))
             self.c2 = (g("scan_enc.conv.2.weight"), g("scan_enc.conv.2.bias"))
@@ -107,12 +120,13 @@ class Weights:
 def enc1d(scan, W: Weights):
     """scan (4, N) → 층별 활성 (프레임별 리스트)."""
     acts = {"in": scan, "c1": [], "c2": [], "c3": [], "pool": [], "z": []}
+    (_, _, s1, p1), (_, _, s2, p2), (_, _, s3, p3) = W.c1d_spec
     for k in range(scan.shape[0]):
-        a1 = relu(conv1d(scan[k][None], *W.c1))
-        a2 = relu(conv1d(a1, *W.c2))
-        a3 = relu(conv1d(a2, *W.c3))
-        kk = W.pool_k
-        p = a3[:, :kk * 8].reshape(64, 8, kk).mean(-1)
+        a1 = relu(conv1d(scan[k][None], *W.c1, stride=s1, pad=p1))
+        a2 = relu(conv1d(a1, *W.c2, stride=s2, pad=p2))
+        a3 = relu(conv1d(a2, *W.c3, stride=s3, pad=p3))
+        kk, nn_ = W.pool_k, W.pool_n
+        p = a3[:, :kk * nn_].reshape(a3.shape[0], nn_, kk).mean(-1)
         z = relu(W.fc1[0] @ p.reshape(-1) + W.fc1[1])
         for n, v in (("c1", a1), ("c2", a2), ("c3", a3), ("pool", p), ("z", z)):
             acts[n].append(v)
@@ -121,7 +135,7 @@ def enc1d(scan, W: Weights):
 
 # ------------------------------------------------------------------ BEV (policy.BEVRasterizer 의 numpy 판)
 def bev_raster(scan, state, lidar: LidarSpec, norm: NormSpec, x_min=-1.5, x_max=13.5,
-               y_half=7.5, res=0.1, free_samples=16, free_stride=3):
+               y_half=7.5, res=0.1):
     T, N = scan.shape
     H, Wd = int(round((x_max - x_min) / res)), int(round(2 * y_half / res))
     img = np.zeros((T + 1, H, Wd), np.float32)
@@ -152,10 +166,9 @@ def bev_raster(scan, state, lidar: LidarSpec, norm: NormSpec, x_min=-1.5, x_max=
         c, s = np.cos(pth[k]), np.sin(pth[k])
         gx, gy = px[k] + c * lx - s * ly, py[k] + s * lx + c * ly
         put(k, gx[hit[k]], gy[hit[k]])
-    rs = r[T - 1, ::free_stride]
-    fr = (np.arange(free_samples) + 0.5) / free_samples
-    tt = rs[:, None] * fr[None]
-    put(T, (tt * ca[::free_stride, None] + lidar.mount_x).ravel(), (tt * sa[::free_stride, None]).ravel())
+    from .obs_builder import bev_polar_lut          # policy.BEVRasterizer 와 같은 조회표
+    lb, lrho, lok = bev_polar_lut(lidar, x_min, x_max, y_half, res)
+    img[T] = ((lrho < r[T - 1][lb] - res) & lok).reshape(H, Wd).astype(np.float32)
     return img, dict(x_min=x_min, x_max=x_max, y_half=y_half)
 
 
@@ -212,7 +225,7 @@ def draw_world(ax, env, span=6.0):
     x, y, yaw = env.state[0], env.state[1], env.state[4]
     ext = [g.ox, g.ox + g.w * g.res, g.oy, g.oy + g.h * g.res]
     ax.imshow(np.where(g.occ, 0.35, 1.0), cmap="gray", extent=ext, vmin=0, vmax=1, origin="upper")
-    raw = env.lidar.scan(x, y, yaw, noise=False)
+    raw = env.lidar.scan(x, y, yaw, noise=False, obstacles=getattr(env, "obstacles", None))
     ang = beam_angles(env.cfg.lidar)
     lx = x + env.cfg.lidar.mount_x * np.cos(yaw)
     ly = y + env.cfg.lidar.mount_x * np.sin(yaw)
@@ -220,6 +233,9 @@ def draw_world(ax, env, span=6.0):
         ax.plot([lx, lx + raw[i] * np.cos(yaw + ang[i])], [ly, ly + raw[i] * np.sin(yaw + ang[i])],
                 color="#9ecae1", lw=0.5, zorder=2)
     ax.scatter(lx + raw * np.cos(yaw + ang), ly + raw * np.sin(yaw + ang), s=1.2, color="#08306b", zorder=3)
+    import matplotlib.pyplot as plt
+    for cx, cy, r in getattr(env, "obstacles", np.zeros((0, 3))):
+        ax.add_patch(plt.Circle((cx, cy), r, color="#d62728", zorder=5))
     L = 0.6
     ax.arrow(x, y, L * np.cos(yaw), L * np.sin(yaw), width=0.08, color="#e6550d", zorder=4)
     ax.set_xlim(x - span, x + span); ax.set_ylim(y - span, y + span); ax.set_aspect("equal")
@@ -254,8 +270,9 @@ def fig_1d(env, obs, W, out, trained):
     ax.imshow(obs["scan"].astype(np.float32), aspect="auto", cmap=CMAP + "_r", vmin=0, vmax=1, interpolation="nearest")
     _style(ax, "③ 입력 행렬 4 × 1125  (행 = 시간 n-4…n-1, 열 = 각도, 진할수록 가까움)")
 
-    for i, (key, shp, ttl) in enumerate([("c1", "32 × 563", "Conv1 출력"), ("c2", "64 × 282", "Conv2 출력"),
-                                         ("c3", "64 × 141", "Conv3 출력")]):
+    shp_ = [f"{c} × {L}" for c, L in W.c1d_len]
+    for i, (key, shp, ttl) in enumerate([("c1", shp_[0], "Conv1 출력"), ("c2", shp_[1], "Conv2 출력"),
+                                         ("c3", shp_[2], "Conv3 출력")]):
         ax = fig.add_subplot(gs[2, i])
         m = a[key][-1]
         ax.imshow(m / (m.max(1, keepdims=True) + 1e-9), aspect="auto", cmap=CMAP, interpolation="nearest")
