@@ -168,6 +168,13 @@ class TimeLimitCallback(BaseCallback):
         return True
 
 
+class _PolicyWarmupSAC(SAC):
+    """이어 학습용: learning_starts 전(버퍼 다시 모으는 구간)에도 무작위 대신 현재 정책으로 행동."""
+
+    def _sample_action(self, learning_starts, action_noise=None, n_envs=1):
+        return super()._sample_action(0, action_noise, n_envs)
+
+
 def _find_resume(save_dir: Path) -> Path | None:
     """save_dir 안에서 가장 최근 모델(last_model 또는 최신 체크포인트)을 찾는다."""
     cands = list((save_dir / "checkpoints").glob("*.zip")) + [save_dir / "last_model.zip"]
@@ -244,8 +251,8 @@ def main():
         # 그걸로 바로 업데이트하면 이미 배운 정책이 무너진다 (ep_len 837 → 114 관찰).
         # → 이어 학습 때는 불러온 정책(확률적 SAC 행동)으로 모은다.
         model.learning_starts = model.num_timesteps + min(args.learning_starts, 10_000)
-        _orig_sample = model._sample_action
-        model._sample_action = lambda _ls, action_noise=None, n_envs=1: _orig_sample(0, action_noise, n_envs)
+        # 인스턴스에 함수를 붙이면 model.save 가 그걸 pickle 하다 실패한다 → 클래스만 바꾼다
+        model.__class__ = _PolicyWarmupSAC
         print(f"[train] 이어 학습: step {model.num_timesteps:,} 부터, 정책 행동으로 1만 스텝 모은 뒤 업데이트 재개")
         reset_ts = False
     else:
