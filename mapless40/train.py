@@ -239,8 +239,14 @@ def main():
         print(f"[train] resume auto → {resume or '없음, 새로 시작'}")
     if resume:
         model = SAC.load(resume, env=env, device=device)
-        # 리플레이 버퍼는 저장하지 않으므로 5천 스텝(랜덤 행동)을 다시 모은 뒤 학습 재개
-        model.learning_starts = model.num_timesteps + min(args.learning_starts, 5_000)
+        # 리플레이 버퍼는 저장하지 않으므로 1만 스텝을 다시 모은 뒤 학습 재개.
+        # SB3 기본은 이 구간을 **무작위 행동**으로 채운다 → 버퍼가 충돌 데이터로 가득 차고,
+        # 그걸로 바로 업데이트하면 이미 배운 정책이 무너진다 (ep_len 837 → 114 관찰).
+        # → 이어 학습 때는 불러온 정책(확률적 SAC 행동)으로 모은다.
+        model.learning_starts = model.num_timesteps + min(args.learning_starts, 10_000)
+        _orig_sample = model._sample_action
+        model._sample_action = lambda _ls, action_noise=None, n_envs=1: _orig_sample(0, action_noise, n_envs)
+        print(f"[train] 이어 학습: step {model.num_timesteps:,} 부터, 정책 행동으로 1만 스텝 모은 뒤 업데이트 재개")
         reset_ts = False
     else:
         model = SAC(
