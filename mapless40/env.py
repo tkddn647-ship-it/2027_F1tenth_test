@@ -81,7 +81,15 @@ class MaplessRaceEnv40(gym.Env):
         self.rng = np.random.default_rng(seed)
         if isinstance(maps, str):
             maps = [m for m in maps.split(",") if m]
-        self.tracks = tracks if tracks is not None else [load_track(m, self.cfg) for m in maps]
+        # "ifac:3" 처럼 가중치를 붙이면 그 비율로 트랙을 뽑는다 (기본 1)
+        names, weights = [], []
+        for m in maps:
+            n, _, w = str(m).partition(":")
+            names.append(n)
+            weights.append(float(w) if w else 1.0)
+        self.tracks = tracks if tracks is not None else [load_track(m, self.cfg) for m in names]
+        w = np.asarray(weights[:len(self.tracks)] if tracks is None else [1.0] * len(self.tracks))
+        self.track_p = w / w.sum()
         self.sensor_noise = sensor_noise
         self.randomize = randomize
         c = self.cfg
@@ -123,6 +131,18 @@ class MaplessRaceEnv40(gym.Env):
             if (d2 < ob[None, :, 2] ** 2).any():
                 return True
         return False
+
+    def _clearance(self) -> float:
+        """차체 옆면 기준 가장 가까운 벽·장애물까지 여유 [m] (CG·앞·뒤 3점 중 최소)."""
+        c, (x, y, yaw) = self.cfg, (self.state[0], self.state[1], self.state[4])
+        lx = np.array([0.0, 0.7 * c.front, -0.7 * c.rear])
+        px, py = x + lx * np.cos(yaw), y + lx * np.sin(yaw)
+        d = float(self.track.grid.distance(px, py).min())
+        ob = self.obstacles
+        if len(ob):
+            d = min(d, float((np.hypot(px[:, None] - ob[None, :, 0], py[:, None] - ob[None, :, 1])
+                              - ob[None, :, 2]).min()))
+        return d - c.half_width
 
     def _raw_scan(self) -> np.ndarray:
         raw = self.lidar.scan(self.state[0], self.state[1], self.state[4], noise=self.sensor_noise,
@@ -189,7 +209,7 @@ class MaplessRaceEnv40(gym.Env):
         if "map" in options:
             self.track = next(t for t in self.tracks if t.name == options["map"])
         else:
-            self.track = self.tracks[int(self.rng.integers(len(self.tracks)))]
+            self.track = self.tracks[int(self.rng.choice(len(self.tracks), p=self.track_p))]
         self.lidar = LidarSim(self.track.grid, c.lidar, self.rng)
         line = self.track.line
 
@@ -330,6 +350,10 @@ class MaplessRaceEnv40(gym.Env):
         rew -= r.w_v * dv * dv * (r.over_mult if dv > 0 else 1.0) * dt_tick
         rew -= r.w_dsteer * abs(self.cmd[0] - self.cmd_prev[0]) / c.act.steer_max
         rew -= r.w_slip * max(abs(self.state[6]) - 0.05, 0.0) * dt_tick
+        if r.w_wall > 0:
+            clear = self._clearance()
+            if clear < r.wall_clear:
+                rew -= r.w_wall * (r.wall_clear - max(clear, 0.0)) / r.wall_clear * dt_tick
         if lap_done:
             rew += r.lap_bonus
         reversed_ = self.reverse_t >= r.reverse_s

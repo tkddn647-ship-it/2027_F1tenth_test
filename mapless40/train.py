@@ -111,7 +111,7 @@ class LapEvalCallback(BaseCallback):
               f"최고랩={np.min(laps) if laps else '-'}  | {per_map}", flush=True)
         if score > self.best:
             self.best = score
-            self.model.save(str(self.save_dir / "best_model"))
+            _safe_save(self.model, self.save_dir / "best_model.zip")
             self.best_file.write_text(json.dumps({"score": score, "timesteps": int(self.num_timesteps)}))
             print(f"[eval] new best → {self.save_dir / 'best_model.zip'}", flush=True)
         return True
@@ -217,9 +217,12 @@ def _find_resume(save_dir: Path) -> Path | None:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--maps", default="Spielberg,Silverstone,Monza,Catalunya")
-    p.add_argument("--eval-maps", default="Budapest")
-    p.add_argument("--encoder", choices=["conv1d", "bev", "both"], default="conv1d")
+    p.add_argument("--maps", default="ifac:3,roboracer_0817:3,Spielberg:1,Silverstone:1,Monza:1",
+                   help="쉼표 구분, 'map:가중치' 로 뽑는 비율 지정 (우리가 달릴 좁은 트랙 비중을 크게)")
+    p.add_argument("--eval-maps", default="ifac,roboracer_0817,Budapest")
+    p.add_argument("--target-entropy", type=float, default=-1.0,
+                   help="SAC 목표 엔트로피. 낮을수록 탐색이 빨리 꺼짐 (예전 -2 → ent_coef 0.004 로 굳음)")
+    p.add_argument("--encoder", choices=["conv1d", "bev", "bev1", "both"], default="conv1d")
     p.add_argument("--timesteps", type=int, default=2_000_000)
     p.add_argument("--n-envs", type=int, default=8)
     p.add_argument("--subproc", action="store_true", help="env 를 프로세스로 병렬 실행")
@@ -294,7 +297,7 @@ def main():
             learning_rate=args.lr, buffer_size=args.buffer_size, batch_size=args.batch_size,
             learning_starts=args.learning_starts, gamma=args.gamma, tau=0.005,
             train_freq=1, gradient_steps=args.gradient_steps,
-            ent_coef="auto", target_entropy=-2.0,
+            ent_coef="auto", target_entropy=args.target_entropy,
             policy_kwargs=policy_kwargs, verbose=1, seed=args.seed, device=device,
             tensorboard_log=str(save_dir / "tb") if _has_tb() else None,
         )

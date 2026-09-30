@@ -46,7 +46,7 @@ def test_preprocess_scan_orientation():
     r = np.where(np.abs(ang - np.pi / 2) < 0.05, 1.0, 12.0)   # 왼쪽(+90°)에만 벽
     s = preprocess_scan(r, amin, inc, sp)
     a = beam_angles(sp)
-    assert s[np.argmin(np.abs(a - np.pi / 2))] < 0.1
+    assert s[np.argmin(np.abs(a - np.pi / 2))] < 1.5 / sp.range_max
     assert s[np.argmin(np.abs(a + np.pi / 2))] > 0.7
 
 
@@ -165,7 +165,7 @@ def test_policy_actor_ignores_priv():
     import torch
     from stable_baselines3 import SAC
     from .policy import AsymFeatures, AsymSACPolicy
-    for enc in ("conv1d", "bev", "both"):
+    for enc in ("conv1d", "bev", "bev1", "both"):
         env = _env()
         model = SAC(AsymSACPolicy, env, buffer_size=100, learning_starts=10, batch_size=8,
                     policy_kwargs=dict(features_extractor_class=AsymFeatures,
@@ -257,6 +257,24 @@ def test_bev_raster_numpy():
     assert img[4, row + 5:, col].sum() == 0
 
 
+def test_bev1_raster_geometry():
+    import torch
+    from .policy import BEVRasterizer1
+    sp = LidarSpec()
+    ras = BEVRasterizer1(sp)
+    a = beam_angles(sp)
+    r = np.full(sp.n_beams, 1.0, np.float32)
+    r[np.abs(a) < 0.02] = 5.0 / sp.range_max              # 정면 5 m 벽
+    scan = torch.tensor(np.stack([np.ones_like(r)] * 3 + [r]))[None]   # 최신 프레임만 사용
+    img = ras(scan)[0]
+    assert img.shape == (2, ras.H, ras.W)
+    row = int((5.0 + sp.mount_x - ras.x_min) / ras.res)
+    col = int(ras.y_half / ras.res)
+    assert img[0, row - 1:row + 2, col - 1:col + 2].sum() > 0, "정면 5 m 점"
+    assert img[1, int((2.0 + sp.mount_x - ras.x_min) / ras.res), col - 1:col + 2].sum() > 0, "빔 경로 빈공간"
+    assert img[1, row + 3:, col].sum() == 0, "벽 뒤는 빈공간 아님"
+
+
 def test_connectome_dense_equals_sparse():
     """connectome_rnn 수정 확인: sparse(CPU) 경로 = h@W dense 식 = numpy 참조 구현."""
     import torch
@@ -308,7 +326,7 @@ def test_real_sllidar_layout_and_front_check():
     sp.mount_yaw = true_mount
     s = preprocess_scan(r, amin, inc, sp)
     a = beam_angles(sp)
-    assert s[np.argmin(np.abs(a - np.pi / 2))] < 0.1 and s[np.argmin(np.abs(a + np.pi / 2))] > 0.3
+    assert s[np.argmin(np.abs(a - np.pi / 2))] < 1.5 / sp.range_max and s[np.argmin(np.abs(a + np.pi / 2))] > 0.3
     # 틀린 mount(0) → 가린 구간이 정면으로 보여 검사가 잡아야 함
     c0, _ = blocked_center_deg(invalid_bins(r, amin, inc, 0.0))
     assert abs(c0) < 20, c0
@@ -324,7 +342,7 @@ def main():
     if not quick:
         tests.append(test_env_ftg_completes_lap)
     if _torch_ok():
-        tests += [test_bev_raster_geometry, test_connectome_dense_equals_sparse,
+        tests += [test_bev_raster_geometry, test_bev1_raster_geometry, test_connectome_dense_equals_sparse,
                   test_policy_actor_ignores_priv]
     else:
         print("(torch / stable-baselines3 없음 → 정책 테스트 건너뜀)")

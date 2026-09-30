@@ -19,7 +19,8 @@ class LidarSpec:
 
     fov_deg: float = 270.0
     n_beams: int = 1125            # 270° / 0.24°  (실차 len(ranges) 확인 후 맞출 것)
-    range_max: float = 15.0        # 반사율 10% 한계 15 m → 여기서 자르고 /15 정규화
+    range_max: float = 10.0        # 10 m 에서 자르고 /10 정규화 (멀리 트인 곳에 끌려가는 것 완화,
+                                   # 5 m/s 타력 감속 거리 ~7 m 보다 김). 15 m 는 반사율 10% 한계
     range_min: float = 0.05
     noise_std: float = 0.02        # 데이터시트 ±20–30 mm
     dropout_prob: float = 0.005    # 무반사 빔 비율 (→ range_max 로 채움)
@@ -118,6 +119,8 @@ class RewardSpec:
     over_mult: float = 3.0
     w_dsteer: float = 0.1          # |δ_n − δ_{n−1}| / δ_max (크면 초반 탐색 억제)
     w_slip: float = 2.0            # max(|β|−0.05, 0) · Δt
+    w_wall: float = 2.0            # 벽·장애물 여유 < wall_clear 이면 (부족분/wall_clear)·Δt 벌점
+    wall_clear: float = 0.25       # 차체 옆면 기준 여유 [m] (레이싱라인은 벽에서 0.45 → 차체 옆 0.30)
     collision: float = -20.0
     lap_bonus: float = 20.0
     reverse_s: float = 1.0         # 이만큼 연속 후진(Δs<0)하면 종료 [s]

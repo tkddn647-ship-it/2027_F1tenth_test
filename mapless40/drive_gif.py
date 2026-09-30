@@ -42,6 +42,8 @@ def main():
     from .obs_builder import beam_angles
 
     cfg = EnvConfig(max_episode_s=a.max_s)
+    from .np_actor import apply_model_cfg
+    apply_model_cfg(cfg, a.model)
     env = MaplessRaceEnv40(maps=(a.map,), cfg=cfg)
     ctrl = model_controller(a.model)
     obs, _ = env.reset(seed=a.seed, options={"map": a.map, "s0": a.s0, "lat": 0.0, "dyaw": 0.0,

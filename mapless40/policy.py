@@ -167,6 +167,77 @@ class ScanEncoderBEV(nn.Module):
         return self.fc(self.cnn(img))
 
 
+class BEVRasterizer1(nn.Module):
+    """최신 스캔 1장 → BEV 2채널 (점유 / 빈공간).  RViz 에서 Fixed Frame=base_link 로 본 그림과 같다.
+
+    IMU 로 과거 프레임을 맞추지 않으므로 IMU 타이밍·바이어스 오차가 입력에 안 들어간다.
+    움직임 정보는 상태 벡터(v̄, ω̄, 직전 명령)로 따로 들어간다.
+    격자: 앞 x∈[-1, min(10, range_max)], 좌우 ±5 m, 10 cm → 110×100 (range 10 m 기준).
+    """
+
+    def __init__(self, lidar: LidarSpec, x_min: float = -1.0, x_max: float | None = None,
+                 y_half: float = 5.0, res: float = 0.1):
+        super().__init__()
+        from .obs_builder import bev_polar_lut
+        x_max = float(min(10.0, lidar.range_max)) if x_max is None else x_max
+        half = lidar.fov / 2.0
+        ang = torch.linspace(-half, half, lidar.n_beams)
+        self.register_buffer("cos_a", torch.cos(ang), persistent=False)
+        self.register_buffer("sin_a", torch.sin(ang), persistent=False)
+        lut_b, lut_rho, lut_ok = bev_polar_lut(lidar, x_min, x_max, y_half, res)
+        self.register_buffer("lut_beam", torch.from_numpy(lut_b), persistent=False)
+        self.register_buffer("lut_rho", torch.from_numpy(lut_rho), persistent=False)
+        self.register_buffer("lut_ok", torch.from_numpy(lut_ok), persistent=False)
+        self.range_max, self.mount_x = lidar.range_max, lidar.mount_x
+        self.x_min, self.y_half, self.res = x_min, y_half, res
+        self.H = int(round((x_max - x_min) / res))
+        self.W = int(round(2 * y_half / res))
+        self.C = 2
+
+    def forward(self, scan: torch.Tensor, state: torch.Tensor | None = None) -> torch.Tensor:
+        b = scan.shape[0]
+        last = scan[:, -1].float()                                     # (B, N) 최신 스캔
+        r = last * self.range_max
+        hit = last < 0.999
+        x = r * self.cos_a + self.mount_x
+        y = r * self.sin_a
+        row = torch.floor((x - self.x_min) / self.res).long()
+        col = torch.floor((self.y_half - y) / self.res).long()
+        ok = hit & (row >= 0) & (row < self.H) & (col >= 0) & (col < self.W)
+        HW = self.H * self.W
+        idx = torch.where(ok, row * self.W + col, torch.full_like(row, HW))
+        img = torch.zeros(b, 2 * HW + 1, device=scan.device)
+        img.scatter_(1, idx, 1.0)
+        r_cell = r.index_select(1, self.lut_beam)
+        free = (self.lut_rho[None] < r_cell - self.res) & self.lut_ok[None]
+        img[:, HW:2 * HW] = free.float()
+        return img[:, :-1].reshape(b, 2, self.H, self.W)
+
+
+class ScanEncoderBEV1(nn.Module):
+    """bev1: 최신 스캔 1장 BEV (2×110×100) → Conv2d×4 → 192."""
+
+    def __init__(self, lidar: LidarSpec, out_dim: int = 192):
+        super().__init__()
+        self.raster = BEVRasterizer1(lidar)
+        self.cnn = nn.Sequential(
+            nn.Conv2d(2, 16, 3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(16, 32, 3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(32, 64, 3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(64, 64, 3, stride=2, padding=1), nn.ReLU(),
+            nn.AvgPool2d(2), nn.Flatten(),
+        )
+        with torch.no_grad():
+            flat = self.cnn(torch.zeros(1, 2, self.raster.H, self.raster.W)).shape[-1]
+        self.fc = nn.Sequential(nn.Linear(flat, out_dim), nn.ReLU())
+        self.features_dim = out_dim
+
+    def forward(self, scan: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            img = self.raster(scan)
+        return self.fc(self.cnn(img))
+
+
 class ScanEncoderBoth(nn.Module):
     """1D CNN(거리 배열) 과 BEV 2D CNN(x,y 격자) 을 나란히 돌려 이어 붙인다 → 192 + 192 = 384.
 
@@ -199,6 +270,8 @@ class AsymFeatures(BaseFeaturesExtractor):
             enc = ScanEncoder1D(n_beams, hist)
         elif encoder == "bev":
             enc = ScanEncoderBEV(lidar, norm, hist)
+        elif encoder == "bev1":
+            enc = ScanEncoderBEV1(lidar)
         elif encoder == "both":
             enc = ScanEncoderBoth(lidar, norm, hist)
         else:
