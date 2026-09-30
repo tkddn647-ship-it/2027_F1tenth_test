@@ -350,6 +350,11 @@ class MaplessRaceEnv40(gym.Env):
         rew -= r.w_v * dv * dv * (r.over_mult if dv > 0 else 1.0) * dt_tick
         rew -= r.w_dsteer * abs(self.cmd[0] - self.cmd_prev[0]) / c.act.steer_max
         rew -= r.w_slip * max(abs(self.state[6]) - 0.05, 0.0) * dt_tick
+        if r.w_alat > 0:                    # 마찰 한계 근처 주행 억제 (실측 전 한계라 여유를 둔다)
+            a_lat = abs(v * self.state[5])
+            lim = r.alat_frac * self.a_lat_cap
+            if a_lat > lim:
+                rew -= r.w_alat * (a_lat - lim) / self.a_lat_cap * dt_tick * 10.0
         if r.w_wall > 0:
             clear = self._clearance()
             if clear < r.wall_clear:
