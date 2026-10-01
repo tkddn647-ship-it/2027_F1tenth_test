@@ -58,8 +58,20 @@ class LapEvalCallback(BaseCallback):
         self.save_dir, self.eval_freq, self.n_spawns = save_dir, eval_freq, n_spawns
         self.best_file = save_dir / "best.json"
         self.best = -np.inf
+        # 평가 조건 태그: 차량 한계·보상이 바뀌면 예전 최고 점수와 비교할 수 없다
+        self.tag = f"alat{cfg.a_lat_cap:g}_r{cfg.lidar.range_max:g}"
         if self.best_file.exists():
-            self.best = float(json.loads(self.best_file.read_text())["score"])
+            old = json.loads(self.best_file.read_text())
+            old_tag = old.get("tag", "alat6_r10")          # v3 는 태그 없이 저장됨 (한계 6, 10 m)
+            if old_tag == self.tag:
+                self.best = float(old["score"])
+            else:
+                bm = save_dir / "best_model.zip"
+                if bm.exists():
+                    keep = save_dir / f"best_model_{old_tag}.zip"
+                    bm.replace(keep)
+                    print(f"[eval] 평가 조건이 바뀜 ({old_tag} → {self.tag}): 예전 best 를 {keep.name} 로 보관, "
+                          f"최고 점수 새로 기록", flush=True)
         self.last_eval = 0
         self.csv = save_dir / "eval.csv"
         if not self.csv.exists():
@@ -112,7 +124,8 @@ class LapEvalCallback(BaseCallback):
         if score > self.best:
             self.best = score
             _safe_save(self.model, self.save_dir / "best_model.zip")
-            self.best_file.write_text(json.dumps({"score": score, "timesteps": int(self.num_timesteps)}))
+            self.best_file.write_text(json.dumps({"score": score, "timesteps": int(self.num_timesteps),
+                                                  "tag": self.tag}))
             print(f"[eval] new best → {self.save_dir / 'best_model.zip'}", flush=True)
         return True
 

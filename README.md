@@ -870,7 +870,8 @@ critic: [192 ; 32 ; p 24 ; a 2] = 250 → 256 → 256 → Q
 >
 > **v4 (2026-09-30 밤)** — v3 가 코너 절반 이상을 시뮬 마찰 한계(6 m/s², 실측 아님)에 붙어 돈 것 대응:
 > `a_lat_cap` 6 → 4.5, 한계 80% 넘으면 벌점(`w_alat`), 레이싱라인 속도 프로파일 a_lat 5 → 3.6.
-> 이론 랩 ifac 11.0 → 12.3 s, 팀 맵 10.0 → 11.0 s. 노트북 RUN_DIR `v4_conv1d_alat45`.
+> 이론 랩 ifac 11.0 → 12.3 s, 팀 맵 10.0 → 11.0 s. 노트북 RUN_DIR 은 `v3_conv1d` 그대로 — v3 체크포인트에서 v4 조건으로 이어 학습.
+> 평가 조건 태그(best.json `tag`)가 바뀌면 v3 best 는 `best_model_alat6_r10.zip` 으로 보관되고 best 를 새로 기록한다.
 >
 > **v3 (2026-09-30) 기본값 변경** — 43만 스텝 모델이 넓은 F1 트랙에 맞춰지며 ifac·팀 맵을 못 돌게 된 것(18만 스텝은 팀 맵 3바퀴 무사고) 대응:
 > 학습 맵 `ifac:3,roboracer_0817:3,Spielberg:1,Silverstone:1,Monza:1`(비율 지정), 평가 `ifac,roboracer_0817,Budapest`,
