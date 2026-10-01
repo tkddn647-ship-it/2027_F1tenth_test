@@ -75,12 +75,16 @@ def main():
             meta_path = self.get_parameter("meta").value
             if meta_path and os.path.exists(meta_path):
                 meta = json.loads(open(meta_path, encoding="utf-8").read())
-            else:                                   # zip 만 있을 때: 학습 기본 설정값
+            else:                                   # zip 만 있을 때: zip 에 기록된 학습 설정
                 from .config import EnvConfig
-                c = EnvConfig().to_dict()
+                from .np_actor import apply_model_cfg
+                ec = EnvConfig()
+                apply_model_cfg(ec, self.get_parameter("model").value)
+                c = ec.to_dict()
                 meta = {"lidar": c["lidar"], "norm": c["norm"], "act": c["act"],
                         "action": c["action"], "hist": c["timing"]["hist"]}
-                self.get_logger().warn(f"meta 파일 없음({meta_path}) → config.py 기본값 사용")
+                self.get_logger().warn(f"meta 파일 없음({meta_path}) → 모델 zip 의 LiDAR 설정 "
+                                       f"(range_max {c['lidar']['range_max']}) + config.py 기본값 사용")
             self.lidar = LidarSpec(**meta["lidar"])
             self.norm = NormSpec(**meta["norm"])
             self.act = ActuatorSpec(**meta["act"])

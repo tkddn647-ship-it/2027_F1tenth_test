@@ -58,8 +58,20 @@ class LapEvalCallback(BaseCallback):
         self.save_dir, self.eval_freq, self.n_spawns = save_dir, eval_freq, n_spawns
         self.best_file = save_dir / "best.json"
         self.best = -np.inf
+        # 평가 조건 태그: 차량 한계·보상이 바뀌면 예전 최고 점수와 비교할 수 없다
+        self.tag = f"alat{cfg.a_lat_cap:g}_r{cfg.lidar.range_max:g}"
         if self.best_file.exists():
-            self.best = float(json.loads(self.best_file.read_text())["score"])
+            old = json.loads(self.best_file.read_text())
+            old_tag = old.get("tag", "alat6_r10")          # v3 는 태그 없이 저장됨 (한계 6, 10 m)
+            if old_tag == self.tag:
+                self.best = float(old["score"])
+            else:
+                bm = save_dir / "best_model.zip"
+                if bm.exists():
+                    keep = save_dir / f"best_model_{old_tag}.zip"
+                    bm.replace(keep)
+                    print(f"[eval] 평가 조건이 바뀜 ({old_tag} → {self.tag}): 예전 best 를 {keep.name} 로 보관, "
+                          f"최고 점수 새로 기록", flush=True)
         self.last_eval = 0
         self.csv = save_dir / "eval.csv"
         if not self.csv.exists():
@@ -111,8 +123,9 @@ class LapEvalCallback(BaseCallback):
               f"최고랩={np.min(laps) if laps else '-'}  | {per_map}", flush=True)
         if score > self.best:
             self.best = score
-            self.model.save(str(self.save_dir / "best_model"))
-            self.best_file.write_text(json.dumps({"score": score, "timesteps": int(self.num_timesteps)}))
+            _safe_save(self.model, self.save_dir / "best_model.zip")
+            self.best_file.write_text(json.dumps({"score": score, "timesteps": int(self.num_timesteps),
+                                                  "tag": self.tag}))
             print(f"[eval] new best → {self.save_dir / 'best_model.zip'}", flush=True)
         return True
 
@@ -217,9 +230,12 @@ def _find_resume(save_dir: Path) -> Path | None:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--maps", default="Spielberg,Silverstone,Monza,Catalunya")
-    p.add_argument("--eval-maps", default="Budapest")
-    p.add_argument("--encoder", choices=["conv1d", "bev", "both"], default="conv1d")
+    p.add_argument("--maps", default="ifac:3,roboracer_0817:3,Spielberg:1,Silverstone:1,Monza:1",
+                   help="쉼표 구분, 'map:가중치' 로 뽑는 비율 지정 (우리가 달릴 좁은 트랙 비중을 크게)")
+    p.add_argument("--eval-maps", default="ifac,roboracer_0817,Budapest")
+    p.add_argument("--target-entropy", type=float, default=-1.0,
+                   help="SAC 목표 엔트로피. 낮을수록 탐색이 빨리 꺼짐 (예전 -2 → ent_coef 0.004 로 굳음)")
+    p.add_argument("--encoder", choices=["conv1d", "bev", "bev1", "both"], default="conv1d")
     p.add_argument("--timesteps", type=int, default=2_000_000)
     p.add_argument("--n-envs", type=int, default=8)
     p.add_argument("--subproc", action="store_true", help="env 를 프로세스로 병렬 실행")
@@ -294,7 +310,7 @@ def main():
             learning_rate=args.lr, buffer_size=args.buffer_size, batch_size=args.batch_size,
             learning_starts=args.learning_starts, gamma=args.gamma, tau=0.005,
             train_freq=1, gradient_steps=args.gradient_steps,
-            ent_coef="auto", target_entropy=-2.0,
+            ent_coef="auto", target_entropy=args.target_entropy,
             policy_kwargs=policy_kwargs, verbose=1, seed=args.seed, device=device,
             tensorboard_log=str(save_dir / "tb") if _has_tb() else None,
         )

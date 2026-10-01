@@ -155,6 +155,9 @@ def main():
     a = p.parse_args()
 
     cfg = EnvConfig(max_episode_s=a.max_s)
+    if a.model:
+        from .np_actor import apply_model_cfg
+        apply_model_cfg(cfg, a.model)          # 학습 때 range_max 등 그대로
     env = MaplessRaceEnv40(maps=a.maps, cfg=cfg, seed=0, sensor_noise=not a.no_noise, randomize=False)
     if a.model:
         ctrl, name = model_controller(a.model), Path(a.model).stem

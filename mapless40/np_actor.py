@@ -80,6 +80,33 @@ def load_torch_state_dict(raw: bytes) -> dict:
     return dict(U(io.BytesIO(zf.read(pkl))).load())
 
 
+def model_obs_cfg(path: str) -> tuple[dict | None, dict | None]:
+    """SB3 zip 에 기록된 학습 때 LiDAR·정규화 설정 (lidar_cfg, norm_cfg). torch 불필요.
+
+    range_max 등이 바뀐 뒤 옛 모델을 돌릴 때 입력을 학습 때와 똑같이 만들려고 쓴다.
+    """
+    try:
+        with zipfile.ZipFile(path) as z:
+            d = json.loads(z.read("data"))
+        kw = d["policy_kwargs"]["features_extractor_kwargs"]
+        return kw.get("lidar_cfg"), kw.get("norm_cfg")
+    except Exception:
+        return None, None
+
+
+def apply_model_cfg(cfg, path: str) -> None:
+    """EnvConfig 의 lidar·norm 을 모델이 학습된 값으로 덮어쓴다 (.zip 만)."""
+    if not str(path).endswith(".zip"):
+        return
+    lc, nc = model_obs_cfg(path)
+    for k, v in (lc or {}).items():
+        if hasattr(cfg.lidar, k):
+            setattr(cfg.lidar, k, v)
+    for k, v in (nc or {}).items():
+        if hasattr(cfg.norm, k):
+            setattr(cfg.norm, k, v)
+
+
 def load_sb3_zip(path: str) -> tuple[dict, dict]:
     """SB3 zip → (policy state_dict numpy, data json)."""
     with zipfile.ZipFile(path) as z:

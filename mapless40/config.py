@@ -19,7 +19,8 @@ class LidarSpec:
 
     fov_deg: float = 270.0
     n_beams: int = 1125            # 270° / 0.24°  (실차 len(ranges) 확인 후 맞출 것)
-    range_max: float = 15.0        # 반사율 10% 한계 15 m → 여기서 자르고 /15 정규화
+    range_max: float = 10.0        # 10 m 에서 자르고 /10 정규화 (멀리 트인 곳에 끌려가는 것 완화,
+                                   # 5 m/s 타력 감속 거리 ~7 m 보다 김). 15 m 는 반사율 10% 한계
     range_min: float = 0.05
     noise_std: float = 0.02        # 데이터시트 ±20–30 mm
     dropout_prob: float = 0.005    # 무반사 빔 비율 (→ range_max 로 채움)
@@ -95,7 +96,7 @@ class NormSpec:
 
 @dataclass
 class RacelineSpec:
-    a_lat: float = 5.0             # 실차 한계 6.0 에 여유 (μ 랜덤화 포함)
+    a_lat: float = 3.6             # 시뮬 한계 a_lat_cap 4.5 의 80% (v_ref 가 한계에 붙지 않게)
     a_accel: float = 4.0
     a_brake: float = 1.8           # 실차 타력 감속 수준에 맞춤 [측정 필요]
     v_max: float = 5.0
@@ -118,6 +119,10 @@ class RewardSpec:
     over_mult: float = 3.0
     w_dsteer: float = 0.1          # |δ_n − δ_{n−1}| / δ_max (크면 초반 탐색 억제)
     w_slip: float = 2.0            # max(|β|−0.05, 0) · Δt
+    w_alat: float = 1.0            # |v·ω| 가 a_lat_cap·alat_frac 을 넘으면 (초과분/cap)·Δt 벌점
+    alat_frac: float = 0.8
+    w_wall: float = 2.0            # 벽·장애물 여유 < wall_clear 이면 (부족분/wall_clear)·Δt 벌점
+    wall_clear: float = 0.25       # 차체 옆면 기준 여유 [m] (레이싱라인은 벽에서 0.45 → 차체 옆 0.30)
     collision: float = -20.0
     lap_bonus: float = 20.0
     reverse_s: float = 1.0         # 이만큼 연속 후진(Δs<0)하면 종료 [s]
@@ -153,7 +158,8 @@ class EnvConfig:
     # 횡가속은 제한하지 못한다 → f1tenth_gym 식별값 μ 를 쓰고, 한계는 a_lat_cap 으로 따로 건다.
     mu: float | None = 1.0489
     mu_rand: float = 0.10          # 에피소드마다 μ × U(1−r, 1+r)
-    a_lat_cap: float = 6.0         # 마찰 한계 근사 |v·ω| ≤ cap [측정 필요] (보수적으로 실차 스펙 6)
+    a_lat_cap: float = 4.5         # 마찰 한계 근사 |v·ω| ≤ cap [측정 필요]. 6(스펙값)으로 학습하니 코너 절반 이상을
+                                   # 한계에 붙어 돌았다(v3 31.8만) → 실측 전까지 4.5 로 낮춤
     a_lat_cap_rand: float = 0.10
     spawn_lat_std: float = 0.15
     spawn_heading_std: float = 0.08

@@ -866,6 +866,19 @@ critic: [192 ; 32 ; p 24 ; a 2] = 250 → 256 → 256 → Q
 > **현재 기본값 = 간단 버전:** 속도 2~5 m/s, 기준 라인은 레이싱라인(센터라인만 있는 맵은 최소곡률 라인),
 > 모르는 값(서보·구동 지연, 가속·코너 한계)은 실차보다 불리한 쪽으로 잡음. ifac: 이론 11.0 s, pure pursuit 11.5 s, FTG 18.0 s.
 
+> **실험 결과·GIF·실패 분석은 [`mapless40/RESULTS.md`](mapless40/RESULTS.md)** (v3 31.8만 스텝: 팀 맵 4/4 3바퀴 9.6 s, ifac 최고 10.9 s).
+>
+> **v4 (2026-09-30 밤)** — v3 가 코너 절반 이상을 시뮬 마찰 한계(6 m/s², 실측 아님)에 붙어 돈 것 대응:
+> `a_lat_cap` 6 → 4.5, 한계 80% 넘으면 벌점(`w_alat`), 레이싱라인 속도 프로파일 a_lat 5 → 3.6.
+> 이론 랩 ifac 11.0 → 12.3 s, 팀 맵 10.0 → 11.0 s. 노트북 RUN_DIR 은 `v3_conv1d` 그대로 — v3 체크포인트에서 v4 조건으로 이어 학습.
+> 평가 조건 태그(best.json `tag`)가 바뀌면 v3 best 는 `best_model_alat6_r10.zip` 으로 보관되고 best 를 새로 기록한다.
+>
+> **v3 (2026-09-30) 기본값 변경** — 43만 스텝 모델이 넓은 F1 트랙에 맞춰지며 ifac·팀 맵을 못 돌게 된 것(18만 스텝은 팀 맵 3바퀴 무사고) 대응:
+> 학습 맵 `ifac:3,roboracer_0817:3,Spielberg:1,Silverstone:1,Monza:1`(비율 지정), 평가 `ifac,roboracer_0817,Budapest`,
+> `target_entropy` −2 → −1 (탐색이 ent_coef 0.004 로 꺼지던 것), 벽 여유 보상(차체 옆 0.25 m 미만이면 벌점, 레이싱라인 위에선 거의 0),
+> LiDAR `range_max` 15 → 10 m. 옛 모델(zip)은 zip 에 기록된 학습 때 range 를 evaluate·drive_gif·ros_node 가 자동으로 쓴다.
+> 새 인코더 `--encoder bev1`: 최신 스캔 1장을 RViz(base_link) 그림과 같은 2×110×100 격자(점유·빈공간)로 → 2D CNN.
+
 ### 12.1 순서
 
 ```powershell
