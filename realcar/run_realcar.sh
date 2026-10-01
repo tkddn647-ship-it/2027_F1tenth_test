@@ -5,7 +5,8 @@
 #
 # 띄우는 것:  sensor_layer (LiDAR 40 Hz + IMU + 고정 TF)
 #             mapless40.ros_node (모델, /drive 발행)
-#             control_node (전경 — Space=ESTOP, r=해제)
+#             control_node (전경 — Space=ESTOP, r=해제). 이 레포의 control_node.py 를 직접 실행
+#             (RC 신호 끊기면 AUTO 해제 수정 포함 — Jetson 워크스페이스 빌드 불필요)
 # 조종기:     CH5 수동 = 사람 조종 / CH5 자율 = 모델 / CH6 = ESTOP
 #
 # 환경변수로 바꿀 수 있는 값 (기본값):
@@ -24,7 +25,7 @@ MOUNT_YAW=${MOUNT_YAW:-}
 BAG=${BAG:-1}
 # 테스트용 대체 명령 (보통 건드리지 않음)
 SENSOR_CMD=${SENSOR_CMD:-ros2 launch sensor_layer sensor_layer_launch.py}
-CONTROL_CMD=${CONTROL_CMD:-ros2 run path_following control_node}
+CONTROL_CMD=${CONTROL_CMD:-python3 $REPO/Roboracer-2026-main/src/path_following/path_following/control_node.py}
 
 LOG="$REPO/realcar/logs/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOG"
@@ -38,7 +39,7 @@ source /opt/ros/humble/setup.bash
 if [ -f "$WS/install/setup.bash" ]; then source "$WS/install/setup.bash"
 else red "워크스페이스 없음: $WS/install/setup.bash  (WS=... 로 지정)"; exit 1; fi
 set -u
-python3 -c "import numpy" 2>/dev/null || { red "numpy 없음"; exit 1; }
+python3 -c "import numpy, serial" 2>/dev/null || { red "numpy / pyserial 없음 (pip3 install pyserial)"; exit 1; }
 
 PIDS=()
 cleanup() {

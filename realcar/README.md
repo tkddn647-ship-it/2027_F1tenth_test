@@ -8,7 +8,9 @@ cd ~ && git clone -b feat/mapless40-asym-sac https://github.com/tkddn647-ship-it
 # 모델 zip 이 레포에 없으면 PC 에서 복사:
 #   scp mapless40/last_model.zip nvidia@<jetson-ip>:~/2027_F1tenth_test/mapless40/
 ```
-실차 워크스페이스 `/home/nvidia/f1tenth_ajou` 가 빌드돼 있어야 한다 (sensor_layer, path_following). torch 불필요 (numpy).
+실차 워크스페이스 `/home/nvidia/f1tenth_ajou` 는 **센서(sensor_layer: LiDAR·IMU 드라이버)** 용으로만 쓴다.
+`control_node` 는 이 레포의 `Roboracer-2026-main/.../control_node.py` 를 직접 실행하므로 따로 빌드할 필요 없다.
+torch 불필요 (numpy, pyserial).
 
 ## 실행
 ```bash
@@ -34,4 +36,4 @@ cd ~ && git clone -b feat/mapless40-asym-sac https://github.com/tkddn647-ship-it
 ## 주의
 - 정책 출력은 2~5 m/s 라 최소 2 m/s 로 달린다. 정지는 CH5 수동 / ESTOP 으로만.
 - 능동 브레이크 없음 (타력 감속). ESTOP 도 duty 0 → 타력 정지.
-- control_node 는 AUTO 중 RC 신호가 끊겨도 AUTO 를 유지한다 (`_is_autonomous_mode`). 수신기 failsafe 로 CH5 가 수동값이 되는지 확인할 것.
+- RC 신호가 0.3 s 끊기면 AUTO 가 풀리고 duty 0 (이 레포 control_node.py 에 추가한 failsafe). 출발 전 조종기를 꺼서 차가 서는지 한 번 확인.
