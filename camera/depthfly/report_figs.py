@@ -74,8 +74,8 @@ def fig_signal(out: Path):
     ax.set_ylabel("mean |output| (log)", color=MUTED, fontsize=8)
     ax.grid(axis="y", color=GRID, lw=0.6, zorder=0)
     _style(ax)
-    ax.set_title("Optic-lobe pathway sizes while driving ifac (pure pursuit, 2 obstacles)", fontsize=9, loc="left")
-    ax.legend(fontsize=7.5, frameon=False, loc="upper left")
+    ax.set_title("Optic-lobe pathway sizes while driving ifac (pure pursuit, 2 obstacles)", fontsize=9, loc="left", pad=22)
+    ax.legend(fontsize=7.5, frameon=False, loc="lower left", bbox_to_anchor=(0, 1.02), ncol=3)
     fig.tight_layout(); fig.savefig(out / "signal.png"); plt.close(fig)
     return rows
 
