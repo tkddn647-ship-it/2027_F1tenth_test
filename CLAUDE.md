@@ -1,5 +1,7 @@
 # CLAUDE.md — 이 레포에서 작업할 때 먼저 읽을 것
 
+전체 진행 보고서(그림·GIF): [REPORT.md](REPORT.md)
+
 F1TENTH / Roboracer 2026 (아주대). **맵·위치추정 없이(mapless) 센서 → 강화학습 정책 → `/drive`** 로 달리는 것이 목표.
 실차 컴퓨터 Jetson Orin Nano (6코어, 추론은 torch 없이 numpy). 학습은 Colab 무료 T4 (노트북 확보 후 로컬도).
 사용자와는 **한국어**로, 헷갈리지 않게 짧고 정확하게. 추정값과 실측값을 섞어 말하지 말 것.
@@ -50,7 +52,7 @@ python -m mapless40.tests
 
 ```
 depth (Gemini 2L, 30 fps) → 파리 눈 격자 16×64 '가까움' = 0.25 m / 수평거리 (바닥 제거, 7 m 밖·구멍 = 0, 구멍 2프레임 유지)
-  × 최근 3프레임 → lamina ON/OFF → T4/T5 (4방향) → HS/VS 32, LPLC2 8, LC 32, L3 24  (= 96)
+  × 최근 3프레임 → lamina ON/OFF (대비 적응 Δ/(|Δ|+0.01)) → T4/T5 (4방향) → HS/VS 32, LPLC2 8, LC 32, L3 24  (= 96)
   → DN 48 (고정 희소 배선 fan-in 12, 부호 고정, 세기만 학습) → tanh ‖ 상태 14 → 선형 읽기 → (조향, 속도)
 ```
 - 30 Hz 인 이유: Gemini 2L depth 최대 30 fps. γ = 0.99^(10/30).

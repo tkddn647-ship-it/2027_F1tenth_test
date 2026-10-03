@@ -6,7 +6,7 @@ depth 카메라 한 대 → 초파리 시각엽 회로 → 하행 뉴런(DN).  �
 입력: near (B, 3, R, C) — '가까움' 영상 프레임 n-2, n-1, n.  가까움 = 0.25 m / 거리 ∈ (0, 1], 측정 없음 = 0.
       (파리 광수용체가 받는 밝기 자리에 가까움을 넣는다: 가까운 벽·장애물이 밝게 보이는 눈)
 
-  lamina   L_ON/L_OFF = ±Δ가까움 (빠른 갈래 n−(n−1), 느린 갈래 (n−1)−(n−2))
+  lamina   L_ON/L_OFF = ±Δ가까움 (빠른 갈래 n−(n−1), 느린 갈래 (n−1)−(n−2)), 대비 적응 Δ/(|Δ|+0.01)
            L3 지속 경로 = 현재 가까움 자체
   T4/T5    Reichardt 상관기 4방향 (왼·오·위·아래), 방향별 이득 학습
   HS/VS    섹터 8 × 밴드 2 의 수평·수직 흐름
@@ -25,6 +25,11 @@ import numpy as np
 from camera.camfly.flybrain import DIR_NAMES, DIRS, _pool_np, _shift_np, _softplus, make_dn_wiring
 
 N_SECT, N_BAND = 8, 2
+# 경로별 고정 이득 (회로 설계값, 학습 안 함): HS, VS, LPLC2, LC, L3.  덕트가 16행 중 1~2행이라 평균 풀링이 묽어지는 것을 보정해
+# ifac 주행에서 각 경로 평균 크기가 ~0.01~0.1 로 비슷해지게 맞춤.  학습되는 이득 softplus(g_lp)/ln2 는 1 에서 시작.
+GAIN0 = (50.0, 50.0, 20.0, 10.0, 1.0)
+LN2 = float(np.log(2.0))
+SIGMA_LAM = 0.01     # lamina 대비 적응: Δ → Δ / (|Δ| + σ).  주행 중 |Δ가까움| 평균 0.003 → 움직임 신호가 가까움과 비슷한 크기로
 
 
 def feature_layout(n_sect: int = N_SECT, n_band: int = N_BAND) -> dict[str, int]:
@@ -50,8 +55,11 @@ PARAM_KEYS = ("g_t4", "g_t5", "g_lp", "w_dn", "b_dn")
 def features_numpy(near, p, n_sect=N_SECT, n_band=N_BAND):
     f0, f1, f2 = near[:, 0], near[:, 1], near[:, 2]
     dn, dp = f2 - f1, f1 - f0
+    if SIGMA_LAM:
+        dn, dp = dn / (np.abs(dn) + SIGMA_LAM), dp / (np.abs(dp) + SIGMA_LAM)
     on_f, on_s, off_f, off_s = np.maximum(dn, 0), np.maximum(dp, 0), np.maximum(-dn, 0), np.maximum(-dp, 0)
-    g4, g5, gl = _softplus(p["g_t4"]), _softplus(p["g_t5"]), _softplus(p["g_lp"])
+    g4, g5 = _softplus(p["g_t4"]), _softplus(p["g_t5"])
+    gl = _softplus(p["g_lp"]) / LN2 * np.asarray(GAIN0, np.float32)
     mot = {}
     for k, name in enumerate(DIR_NAMES):
         dr, dc = DIRS[name]
@@ -110,8 +118,10 @@ if torch is not None:
         def features(self, near):
             f0, f1, f2 = near[:, 0], near[:, 1], near[:, 2]
             dn, dp = f2 - f1, f1 - f0
+            dn, dp = dn / (dn.abs() + SIGMA_LAM), dp / (dp.abs() + SIGMA_LAM)
             on_f, on_s, off_f, off_s = F.relu(dn), F.relu(dp), F.relu(-dn), F.relu(-dp)
-            g4, g5, gl = F.softplus(self.g_t4), F.softplus(self.g_t5), F.softplus(self.g_lp)
+            g4, g5 = F.softplus(self.g_t4), F.softplus(self.g_t5)
+            gl = F.softplus(self.g_lp) / LN2 * self.g_lp.new_tensor(GAIN0)
             mot = {}
             for k, name in enumerate(DIR_NAMES):
                 dr, dc = DIRS[name]
