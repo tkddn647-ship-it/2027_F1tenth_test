@@ -22,6 +22,8 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--every", type=int, default=2)
     p.add_argument("--out", default="depthfly.gif")
+    from .config import add_cfg_args
+    add_cfg_args(p)
     a = p.parse_args()
 
     import matplotlib
@@ -36,7 +38,7 @@ def main():
     from .env import DepthFlyEnv
     from .evaluate import model_controller
 
-    cf = DepthFlyConfig()
+    cf = DepthFlyConfig(v_max=a.v_max, brake=a.brake)
     env = DepthFlyEnv(maps=(a.map,), cfg=cf, seed=a.seed)
     if a.model:
         ctrl = model_controller(a.model)

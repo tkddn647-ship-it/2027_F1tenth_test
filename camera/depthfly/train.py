@@ -27,7 +27,7 @@ from mapless40.policy import AsymSACPolicy
 from mapless40.train import (LapEvalCallback, TimeLimitCallback, _PolicyWarmupSAC, _find_resume,
                              _safe_save)
 
-from .config import DepthFlyConfig
+from .config import DepthFlyConfig, add_cfg_args
 from .env import DepthFlyEnv, make_env
 from .policy import NearFeatures
 
@@ -59,12 +59,13 @@ def main():
     p.add_argument("--save-dir", default=None)
     p.add_argument("--resume", default=None)
     p.add_argument("--time-limit-min", type=float, default=0)
+    add_cfg_args(p)
     args = p.parse_args()
 
     device = args.device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    cf = DepthFlyConfig(fps=args.fps)
+    cf = DepthFlyConfig(fps=args.fps, v_max=args.v_max, brake=args.brake)
     if args.gamma is None:
         args.gamma = 0.99 ** (10.0 / args.fps)
     cf.env.max_episode_s = args.max_episode_s
@@ -104,7 +105,8 @@ def main():
     n_act = sum(p.numel() for p in actor.parameters())
     n_brain = sum(p.numel() for p in actor.features_extractor.parameters())
     print(f"[train] depthfly (depth + 커넥톰) pi={args.pi_net or '선형'} device={model.device} "
-          f"actor_params={n_act:,} (brain {n_brain:,}) maps={maps} eval={eval_maps} gamma={args.gamma:.4f}")
+          f"actor_params={n_act:,} (brain {n_brain:,}) maps={maps} eval={eval_maps} gamma={args.gamma:.4f} "
+          f"v={cf.env.action.v_min:g}~{cf.env.action.v_max:g} m/s brake={cf.env.act.brake_enabled}")
 
     cbs = CallbackList([
         LapEvalCallback(eval_maps, cf.env, save_dir, args.eval_freq, env_cls=DepthFlyEnv, env_cfg=cf),

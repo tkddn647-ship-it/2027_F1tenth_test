@@ -27,7 +27,7 @@ Gemini 2L depth (칩에서 계산, 30 fps)
    ▼
 DN 48   고정 희소 배선 (입력 12개, 부호 고정) × 학습되는 세기 → tanh
    ▼  ‖ 상태 14 (v̄×3, ω̄×3, ω, 직전 명령 2, Δt×3)
-선형 읽기 → (조향 ±21.4°, 속도 2~5 m/s)
+선형 읽기 → (조향 ±21.4°, 속도 2~8 m/s)
 critic (학습 전용): 같은 회로 + 레이싱라인·장애물 privileged 27 → MLP 256·256
 ```
 
@@ -68,6 +68,17 @@ python3 -m camera.depthfly.ros_node --ros-args -p model:=best_model.zip -p max_s
 - 토픽 이름은 `ros2 topic list` 로 확인 후 `-p depth_topic:=... -p info_topic:=...`.
 
 ## 4. 검증된 것 / 아직 아닌 것
+
+- **속도 2~8 m/s** (`config.V_MAX`, `--v-max`; mapless40 은 2~5). 능동 브레이크는 `--brake` (기본 꺼짐 = 타력 감속만).
+  학습·평가·시각화에 같은 값을 줘야 한다. pure pursuit 1랩 실측 (레이싱라인 속도 계획, 횡가속 3.6 m/s²):
+
+  | 맵 | 5 m/s 까지 | 8 m/s 까지 | 8 m/s + 브레이크 |
+  |--|--|--|--|
+  | ifac | 14.1 s, 최고 4.5 | 14.1 s, 최고 4.6 | 13.2 s, 최고 5.4 |
+  | roboracer_0817 | 12.6 s, 최고 4.3 | 12.6 s, 최고 4.4 | 11.4 s, 최고 5.1 |
+  | Spielberg (60 s 주행) | 평균 4.2, 최고 4.5 | 평균 5.1, 최고 7.2 | 평균 5.2, 최고 7.2 |
+
+  팀 맵·ifac 은 직선이 짧아 한계를 8 로 올려도 5 m/s 안팎까지만 쓴다. 7 m/s 이상은 큰 서킷 맵에서만 나온다.
 
 - 여기서 (numpy): 시뮬 센서 기하 (3 m 벽 → 덕트 높이 행만, 바닥 제거), 합성 Gemini depth 영상 → 4 m 벽 가까움 ±8 %,
   T4/T5 왼/오 부호, LPLC2 다가옴 선택, 정지 장면 → 움직임 0, ifac pure pursuit 완주 (14.1 s, env 3.3 ms/step).
