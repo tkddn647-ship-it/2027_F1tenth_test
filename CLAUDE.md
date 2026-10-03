@@ -43,7 +43,7 @@ python -m mapless40.tests
 - **SAC asymmetric actor-critic** (`mapless40/policy.py` `AsymSACPolicy`): actor 는 센서·상태만, critic 은 추가로
   **privileged 27** (레이싱라인 오차·곡률·v_ref, 앞 장애물). 레이싱라인은 **학습 신호로만** 쓰이고 실차에는 없다.
 - 센서별 환경 = `MaplessRaceEnv40` 상속 후 `_raw_scan()` 만 바꿈 → `self.hist.push(frame, v̄, ω̄, ω_latest, dt)` → `observation(priv)`.
-- 행동: 조향 ±21.4°, 속도 mapless40 2~5 m/s, **depthfly 2~8 m/s** (`--v-max`, 능동 브레이크는 `--brake`). 실차 배터리 한계 6 m/s 로 적혀 있었음 — 8 m/s 가 실차에서 나오는지 확인 필요. 실차는 `max_speed` 파라미터로 더 낮춤 (처음 2.0).
+- 행동: 조향 ±21.4°, 속도 mapless40 2~5 m/s, **depthfly 2~8 m/s** (`--v-max`, 능동 브레이크는 `--brake`). 실차 최고 속도는 7 m/s (사용자 확인, 2026-10-03), 8 은 여유분. 실차는 `max_speed` 파라미터로 더 낮춤 (처음 2.0).
 - 배포: 학습 zip → `*/np_actor.py` (torch 없이, `mapless40.np_actor.load_sb3_zip`) → `*/ros_node.py`.
 - 학습 저장: `--save-dir` 에 `last_model.zip`(원자적 저장), `best_model.zip`, `best.json`(평가 조건 태그). `--resume auto` 로 이어 학습
   (이어 할 때 워밍업은 랜덤이 아니라 **정책 행동**으로 — `_PolicyWarmupSAC`).
