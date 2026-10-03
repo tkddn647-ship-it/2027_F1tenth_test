@@ -37,4 +37,4 @@ Gemini 2L depth (30 fps, 카메라 칩이 계산)
 ![](docs/report/pdf/camera_drive_frame.png)
 
 *아직 학습 전이라 운전은 pure pursuit 가 하고, 회로는 초기값으로 반응만 보여준다. 왼쪽: 트랙·카메라 시야 91°(주황)·장애물(빨강).
-오른쪽 위→아래: 파리 눈 가까움 영상, 프레임 변화(움직임), 시각엽 출력, 하행 뉴런 48개. 움직이는 GIF: `docs/report/camera_drive.gif`.*
+오른쪽 위→아래: 파리 눈 가까움 영상, 프레임 변화(움직임), 시각엽 출력, 하행 뉴런 48개. 움직이는 GIF: `docs/report/camera_drive.gif` (장애물), 한 바퀴: `camera_lap_ifac.gif` (14.1 s), `camera_lap_team.gif` (12.6 s).*
