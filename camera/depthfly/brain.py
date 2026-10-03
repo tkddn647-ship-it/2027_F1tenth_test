@@ -25,9 +25,10 @@ import numpy as np
 from camera.camfly.flybrain import DIR_NAMES, DIRS, _pool_np, _shift_np, _softplus, make_dn_wiring
 
 N_SECT, N_BAND = 8, 2
-# 경로별 고정 이득 (회로 설계값, 학습 안 함): HS, VS, LPLC2, LC, L3.  덕트가 16행 중 1~2행이라 평균 풀링이 묽어지는 것을 보정해
-# ifac 주행에서 각 경로 평균 크기가 ~0.01~0.1 로 비슷해지게 맞춤.  학습되는 이득 softplus(g_lp)/ln2 는 1 에서 시작.
-GAIN0 = (50.0, 50.0, 20.0, 10.0, 1.0)
+# 경로별 고정 이득 (회로 설계값, 학습 안 함): HS, VS, LPLC2, LC, L3.  평균 풀링이 묽어지는 것을 보정해
+# ifac·팀 맵 주행에서 각 경로 평균 크기가 ~0.03~0.1 로 비슷해지게 맞춤 (행을 지평선 ±8° 에 몬 v2 격자 기준;
+# 균일 격자 때 값 50, 50, 20, 10, 1).  학습되는 이득 softplus(g_lp)/ln2 는 1 에서 시작.
+GAIN0 = (15.0, 15.0, 7.0, 10.0, 1.0)
 LN2 = float(np.log(2.0))
 SIGMA_LAM = 0.01     # lamina 대비 적응: Δ → Δ / (|Δ| + σ).  주행 중 |Δ가까움| 평균 0.003 → 움직임 신호가 가까움과 비슷한 크기로
 

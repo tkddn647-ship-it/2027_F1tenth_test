@@ -15,8 +15,8 @@ import numpy as np
 from camera.camfly.tests import _wall_grid
 
 from .brain import feature_layout, features_numpy, forward_numpy, init_params, make_dn_wiring, n_inputs
-from .config import CameraSpec, DepthFlyConfig, SceneSpec, state_dim
-from .sensor import NEAR_REF, DepthEyeReal, DepthEyeSim, HoleHold
+from .config import DepthCameraSpec as CameraSpec, DepthFlyConfig, SceneSpec, state_dim
+from .sensor import NEAR_REF, DepthEyeReal, DepthEyeSim, HoleHold, keep_height
 
 
 def _offsets():
@@ -27,19 +27,38 @@ def _offsets():
 
 
 def test_sim_sensor_geometry():
-    """3 m 앞 벽: 벽이 보이는 행만 값, 바닥·5 cm 아래 = 없음, 값 = 0.25 / 수평거리."""
+    """3 m 앞 벽: 벽이 보이는 행만 값, 바닥·높이 기준 아래 = 없음, 값 = 0.25 / 수평거리."""
     cam, sc = CameraSpec(), SceneSpec()
     eye = DepthEyeSim(cam, sc)
     r = eye.ranges(_wall_grid(3.0), 0.0, 0.0, 0.0, np.zeros((0, 3)))
     mid = cam.n_cols // 2
     d = 3.0 - cam.mount_x
     z = cam.height + d * np.tan(cam.row_elevations())
-    exp = (z >= cam.min_obj_height) & (z <= sc.duct_height)
+    exp = keep_height(z, d, cam) & (z <= sc.duct_height)
     got = np.isfinite(r[:, mid])
     assert exp.any() and (exp == got).all(), (exp, r[:, mid])
     assert np.allclose(r[got, mid], d, atol=0.05)
     near = eye.frame(_wall_grid(3.0), 0.0, 0.0, 0.0, np.zeros((0, 3)), np.random.default_rng(0), noise=False)
     assert np.allclose(near[got, mid], NEAR_REF / d, atol=2e-3) and (near[~got, mid] == 0).all()
+
+
+def test_floor_leak_pitch_error():
+    """벽 없는 평평한 바닥: pitch 오차 ±1.5° 까지 가짜 칸 0 (시뮬·실차 둘 다)."""
+    cam, sc = CameraSpec(), SceneSpec()
+    eye = DepthEyeSim(cam, sc)
+    W, H = 640, 400
+    f = (W / 2) / np.tan(np.radians(91.0) / 2)
+    K = np.array([[f, 0, W / 2], [0, f, H / 2], [0, 0, 1.0]])
+    yn = ((np.mgrid[0:H, 0:W][0]) - H / 2) / f
+    for err in (-1.5, -1.0, 0.0, 1.0, 1.5):
+        r = eye.ranges(_wall_grid(14.0), 0.0, 0.0, 0.0, np.zeros((0, 3)), np.radians(err))
+        assert not (r < cam.depth_max).any(), (err, int((r < cam.depth_max).sum()))
+        pt = np.radians(cam.pitch_deg + err)
+        den = yn * np.cos(pt) - np.sin(pt)
+        z = np.where(den > 1e-6, cam.height / np.maximum(den, 1e-6), 0.0)
+        z[z > cam.depth_max] = 0.0
+        near = DepthEyeReal(cam, K, W, H).frame(z.astype(np.float32))
+        assert not (near > 0).any(), (err, int((near > 0).sum()))
 
 
 def test_hole_hold():
@@ -191,8 +210,8 @@ def test_sac_loop_and_numpy_actor():
 
 
 def main():
-    tests = [test_sim_sensor_geometry, test_hole_hold, test_real_sensor_synthetic_wall, test_brain_selectivity,
-             test_numpy_brain_speed, test_env_obs_and_pp_lap]
+    tests = [test_sim_sensor_geometry, test_floor_leak_pitch_error, test_hole_hold, test_real_sensor_synthetic_wall,
+             test_brain_selectivity, test_numpy_brain_speed, test_env_obs_and_pp_lap]
     if _torch_ok():
         tests += [test_brain_torch_equals_numpy, test_sac_loop_and_numpy_actor]
     else:

@@ -14,13 +14,13 @@ depth 를 파리 눈 격자(16×64)의 **가까움 영상**으로 바꿔 광수�
 
 ```
 Gemini 2L depth (칩에서 계산, 30 fps)
-   │  칸마다 주변 픽셀 → 차체 좌표 → 바닥(5 cm 아래) 제거 → 가장 가까운 점
+   │  칸마다 주변 픽셀 → 차체 좌표 → 높이 판정 (5 cm + d·tan1.5° ~ 0.40 m + d·tan1.5° 만 남김) → 중앙값
    ▼
-가까움 영상 16×64  (0.25 m / 수평거리, 7 m 밖·구멍 = 0, 구멍은 2프레임까지 직전 값 유지)  × 최근 3프레임 (n-2, n-1, n)
+가까움 영상 16×64  (행 12개는 지평선 ±8°, 0.25 m / 수평거리, 7 m 밖·구멍 = 0, 구멍은 2프레임까지 직전 값 유지)  × 최근 3프레임 (n-2, n-1, n)
    │
    ├ lamina  ON/OFF = ±Δ가까움 (빠른 n−(n−1), 느린 (n−1)−(n−2)), 대비 적응 Δ/(|Δ|+0.01)
    ├ T4/T5   Reichardt 상관기 4방향, 방향별 이득 학습
-   ├ HS/VS   섹터 8 × 밴드 2 수평·수직 흐름            16 + 16     (경로별 고정 이득 HS·VS 50, LPLC2 20, LC 10, L3 1 — REPORT.md §6)
+   ├ HS/VS   섹터 8 × 밴드 2 수평·수직 흐름            16 + 16     (경로별 고정 이득 HS·VS 15, LPLC2 7, LC 10, L3 1)
    ├ LPLC2   섹터별 바깥쪽 흐름 = 다가옴                 8
    ├ LC      섹터·밴드별 가장자리 (덕트·장애물 경계)     32
    └ L3      섹터·밴드별 평균 가까움 + 섹터별 최대       16 + 8      = 96
@@ -33,21 +33,21 @@ critic (학습 전용): 같은 회로 + 레이싱라인·장애물 privileged 27
 
 실제로 쓰이는 학습 값 ≈ 760개 (이득 13, DN 세기 48×12 = 576, DN 바이어스 48, 선형 읽기 62×2+2). 배선(누가 누구에게, 흥분/억제)은 고정.
 
-**왜 30 Hz:** Gemini 2L depth 최대가 30 fps (40 fps 모드 없음). 과거 3프레임 = 0.1 s 의 움직임.
+**왜 30 Hz:** Gemini 2L depth 는 Unbinned 모드(최적 0.30~7.0 m)에서 최대 30 fps. Binned Sparse 모드는 640×400 에서 60 fps 가 되지만 최적 범위가 0.25~5.0 m (데이터시트 v1.0). 과거 3프레임 = 0.1 s 의 움직임.
 **Jetson 부하:** depth 는 카메라가 계산. Jetson 은 칸 샘플링 ~2 ms + 회로 ~0.5 ms (노트북 CPU 측정, Orin Nano 는 2~3배 예상) → 33 ms 예산의 10~20 %, CPU 1코어. GPU·torch 불필요.
 
 ## 2. 파일
 
 | 파일 | 내용 |
 |--|--|
-| `config.py` | `DepthFlyConfig(fps=30, hist=3)` (camfly 설정 재사용: 91°×66°, 높이 0.18 m, 10° 숙임, depth 7 m, σ = 0.005·d², 구멍) |
+| `config.py` | `DepthFlyConfig(fps=30, hist=3)` (camfly 설정 재사용: 91°×66°, 높이 0.18 m, 10° 숙임, depth 0.25~7 m, σ = 0.01·d², 구멍) |
 | `sensor.py` | `DepthEyeSim` (시뮬: 레이캐스팅 → 덕트·장애물만, 잡음·구멍), `DepthEyeReal` (실차 depth 영상 → 같은 격자), `HoleHold` |
 | `brain.py` | 커넥톰 회로 numpy 참조 + torch `DepthFlyBrain` (같은 수식) |
 | `env.py` | `DepthFlyEnv` = mapless40 환경 + 관측 near(3,16,64)·state·priv |
 | `policy.py` / `np_actor.py` | SB3 특징 추출기, 배포용 actor / 학습 zip → numpy actor (torch 없이) |
 | `train.py` / `evaluate.py` / `viz.py` | 학습 · 평가 · 회로 활동 GIF |
 | `ros_node.py` | Jetson ROS2: depth + camera_info + IMU + 속도 → `/drive`, depth 프레임마다 1회 |
-| `tests.py` | numpy 6 (시뮬 센서 기하, 구멍 유지, 합성 depth 영상 → 가까움, 방향·다가옴 선택성, 속도, PP 완주) + torch 2 |
+| `tests.py` | numpy 7 (시뮬 센서 기하, pitch 오차 바닥 누출, 구멍 유지, 합성 depth 영상 → 가까움, 방향·다가옴 선택성, 속도, PP 완주) + torch 2 |
 | `colab_train.ipynb` | 코랩: 테스트 → GIF → 학습 → 평가 → 학습된 정책 GIF (`mapless40_runs/depthfly`) |
 
 ## 3. 사용
@@ -71,7 +71,9 @@ python3 -m camera.depthfly.ros_node --ros-args -p model:=best_model.zip -p max_s
 
 - 여기서 (numpy): 시뮬 센서 기하 (3 m 벽 → 덕트 높이 행만, 바닥 제거), 합성 Gemini depth 영상 → 4 m 벽 가까움 ±8 %,
   T4/T5 왼/오 부호, LPLC2 다가옴 선택, 정지 장면 → 움직임 0, ifac pure pursuit 완주 (14.1 s, env 3.3 ms/step).
-- **torch 부분 (회로 torch == numpy, SAC 루프, numpy actor == torch) 은 코랩 ④ 에서 처음 돈다.**
+- torch 부분 (회로 torch == numpy, SAC 루프, numpy actor == torch) 포함 9/9 통과 (로컬 CPU, torch 2.14).
+- 관측 정의 v2 실측 (pure pursuit 1랩, ifac): 값이 25 % 넘게 있는 행 1~2개 → 4개, 움직임 특징(HS·VS·LPLC2) 평균 크기 0.06~0.08
+  (가까움 0.12), 잡음만 있을 때의 약 3배. 평평한 바닥만 있을 때 pitch 오차 ±1.5° 까지 가짜 칸 0 (전에는 −2° 에서 1.7 m 가짜 벽).
 - 학습 결과 아직 없음.
 
 ## 5. 시뮬 depth 는 무엇이고, 무엇이 실측이 아닌가
@@ -81,8 +83,10 @@ python3 -m camera.depthfly.ros_node --ros-args -p model:=best_model.zip -p max_s
 | 트랙 기하 | LiDAR SLAM 2D 맵 (`maps/`) · 서킷 축소 맵 (`f1tenth_racetracks/`) 의 벽을 **높이 33 cm 덕트**로 세움 | 맵 = 실측(LiDAR), 높이 = 규정 |
 | 장애물 | 원통 r 0.12~0.30 m, 높이 `SceneSpec.obstacle_height` | 가정 |
 | 카메라 | 91°×66°, 높이 0.18 m, 아래로 10°, 차 앞 0.139 m | 사양 + **가정 장착** |
-| depth 오차 | σ = 0.005·d² (4 m 에서 8 cm) | **추정** (비슷한 카메라 사양) |
+| depth 오차 | σ = 0.01·d² (2 m 에서 4 cm = 2 %, 4 m 에서 16 cm) | 데이터시트 상한 (≤ 2 % @ 2 m), d² 모양은 스테레오 일반식 |
+| 최소 거리 | 0.25 m 안쪽 = 측정 없음 | 데이터시트 |
 | depth 구멍 | 확률 2 % + 15 %·(d/7)² , 칸마다 독립 | **추정** |
+| 장착 pitch 오차 | 에피소드마다 ±1°, 프레임마다 σ 0.3° (광선은 실제 pitch, 해석은 가정 pitch) | **추정** |
 | 지연 | 계산 30 ms | **추정** |
 | 없음 | 덕트 사이 틈, 가장자리 가짜 점, 반사 재질(은박·검정)로 인한 큰 구멍, 햇빛, 진동 | — |
 
@@ -94,13 +98,13 @@ python3 -m camera.depthfly.ros_node --ros-args -p model:=best_model.zip -p max_s
 
 | # | 할 일 | 명령 / 방법 | 통과 기준 |
 |--|--|--|--|
-| 1 | torch 테스트 | `python -m camera.depthfly.tests` | 8/8 |
+| 1 | torch 테스트 (완료) | `python -m camera.depthfly.tests` | 9/9 |
 | 2 | 시각화 확인 | `python -m camera.depthfly.viz --map roboracer_0817 --obstacles 2 --out x.gif` | 덕트 띠·장애물이 보이고, 바닥·구멍 깜빡임 없음 |
 | 3 | 짧은 학습 | `python -m camera.depthfly.train --timesteps 60000 --learning-starts 5000 --n-envs 4 --save-dir runs/df_smoke` | steps/s 기록, 진행률·보상 상승 |
 | 4 | 본 학습 | 코랩 노트북 또는 `--timesteps 1000000 --resume auto` | `best.json` 갱신 |
 | 5 | 평가 | `python -m camera.depthfly.evaluate --model …/best_model.zip --maps ifac,roboracer_0817 --obstacles 0` (그리고 `2`) | 비교: PP 14.1 s (ifac), mapless40 v3 10.9 s / 팀 맵 9.63 s |
 | 6 | **센서 스트레스 평가 (구현 필요)** | evaluate 에 옵션: 노이즈 ×2·×3, 구멍 ×2, 섹터 통째 구멍, pitch ±3°, 높이 ±2 cm, 지연 +30 ms | 어느 조건에서 무너지는지 표 |
-| 7 | 행 배치 개선 (구현 필요) | 행을 지평선 근처로 몰기 (열의 정면 ±15° 처럼) → 재학습 | 5·6 결과가 나아지는지 |
+| 7 | 행 배치 개선 (완료, v2) | 12행을 지평선 ±8° 에 (`DepthCameraSpec`) | — |
 | 8 | 시뮬 보강 (구현 필요) | 덕트 사이 틈, 가장자리 가짜 점 | 학습이 여전히 되는지 |
 
 ## 7. 카메라 도착 후
