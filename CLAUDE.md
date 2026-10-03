@@ -53,12 +53,15 @@ python -m mapless40.tests
 ```
 depth (Gemini 2L, 30 fps) → 파리 눈 격자 16×64 '가까움' = 0.25 m / 수평거리 (12행은 지평선 ±8°, 높이 판정, 7 m 밖·구멍 = 0, 구멍 2프레임 유지)
   × 최근 3프레임 → lamina ON/OFF (대비 적응 Δ/(|Δ|+0.01)) → T4/T5 (4방향) → HS/VS 32, LPLC2 8, LC 32, L3 24  (= 96)
-  → DN 48 (고정 희소 배선 fan-in 12, 부호 고정, 세기만 학습) → tanh ‖ 상태 14 → 선형 읽기 → (조향, 속도)
+  → DN 48 (좌우 대칭 배선 fan-in 12: 같은 쪽 흥분·반대쪽 억제, 세기만 학습) → tanh ‖ 상태 14 → 선형 읽기 → (조향, 속도)
+  LPLC2 = 가까움 증가율 Δn/n (v3). 극성 검사: python -m camera.depthfly.polarity (11/11)
 ```
 - 30 Hz 인 이유: Gemini 2L depth Unbinned 모드 최대 30 fps (Binned Sparse 는 640×400 60 fps, 최적 범위 5 m). γ = 0.99^(10/30).
 - 시뮬 depth 는 **2D 맵의 벽을 33 cm 덕트로 세워** 레이캐스팅 + 오차(σ = 0.01·d² = 데이터시트 상한 2 % @ 2 m, 구멍 2% + 15%·(d/7)² 는 추정). **실측 아님.**
 - **관측 정의 v2** (행 재배치·거리 비례 높이 판정·lamina 대비 적응 + 경로별 고정 이득·실차 칸 중앙값·시뮬 pitch 오차). v2 이전 모델과 호환 안 됨, 코랩 저장 폴더 `depthfly_v2`.
 - Jetson 부하: 칸 샘플링 ~2 ms + 회로 ~0.5 ms (클라우드 CPU 측정).
+- **v3**: v2 를 처음부터 SAC → 10만 스텝에 평가 0.2~0.3바퀴. → 극성 수정(LPLC2 거꾸로, DN 부호 랜덤 → 좌우 대칭) + **레이싱라인 모방학습(DAgger, `bc.py`) → SAC (`--bc-init`, critic 먼저 3만 스텝, ent 0.02)**.
+  모방학습만으로 5/8 출발이 3바퀴 완주 (ifac 12.8 s, 팀 맵 11.5 s). 결과 `camera/depthfly/results/bc_init_v3.npz`. 코랩 저장 폴더 `depthfly_v3`.
 
 ## 5. 결정된 것 (사용자와 합의)
 
@@ -71,8 +74,9 @@ depth (Gemini 2L, 30 fps) → 파리 눈 격자 16×64 '가까움' = 0.25 m / �
 ## 6. 다음 할 일 (우선순위)
 
 ### depthfly — 카메라 오기 전 시뮬 검증
-1. **torch 테스트 (완료)**: `python -m camera.depthfly.tests` → 9/9.
-2. **짧은 학습 확인**: `python -m camera.depthfly.train --timesteps 60000 --learning-starts 5000 --n-envs 4 --save-dir runs/df_smoke`
+1. **torch 테스트**: `python -m camera.depthfly.tests` → 12/12 (v3 에서 `test_bc_handoff_torch` 추가, 아직 torch 환경에서 안 돌림).
+2. **모방학습 → SAC (v3)**: 코랩 ⑤-2 → ⑥. 첫 평가(5만)에서 모방학습 수준(5/8) 이 유지되는지, 무너지면 `--actor-freeze-steps`·`--ent-init` 조정.
+   (옛) **짧은 학습 확인**: `python -m camera.depthfly.train --timesteps 60000 --learning-starts 5000 --n-envs 4 --save-dir runs/df_smoke`
    → steps/s 기록, 에피소드 보상·진행률이 오르는지.
 3. **본 학습**: 코랩 `camera/depthfly/colab_train.ipynb` 또는 로컬 `--timesteps 1000000 --resume auto`.
 4. **평가**: `python -m camera.depthfly.evaluate --model runs/.../best_model.zip --maps ifac,roboracer_0817 --obstacles 0` 와 `--obstacles 2`.

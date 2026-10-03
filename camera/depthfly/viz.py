@@ -33,22 +33,29 @@ def main():
 
     from mapless40.evaluate import pp_controller
 
-    from .brain import feature_layout, features_numpy, forward_numpy, init_params, make_dn_wiring, n_inputs
+    from .brain import (feature_layout, features_numpy, forward_numpy, init_params, make_dn_wiring_bilateral, n_inputs,
+                        symmetric_init)
     from .config import DepthFlyConfig
     from .env import DepthFlyEnv
     from .evaluate import model_controller
 
     cf = DepthFlyConfig(v_max=a.v_max, brake=a.brake)
     env = DepthFlyEnv(maps=(a.map,), cfg=cf, seed=a.seed)
-    if a.model:
+    driver = "fly circuit (imitation)" if a.model and a.model.endswith(".npz") else (
+        "fly circuit (SAC)" if a.model else "pure pursuit (circuit not driving)")
+    if a.model and a.model.endswith(".npz"):                 # 모방학습 결과 (camera.depthfly.bc)
+        from .bc import Student
+        ctrl = Student.load(a.model)
+        P, M, S = ctrl.p, ctrl.M, ctrl.S
+    elif a.model:
         ctrl = model_controller(a.model)
         P, M, S = getattr(ctrl, "params", None), getattr(ctrl, "mask", None), getattr(ctrl, "sign", None)
     else:
         ctrl = pp_controller(cf.env)
         P = None
     if P is None:
-        P = init_params(n_inputs())
-        M, S = make_dn_wiring(n_inputs())
+        P = symmetric_init(init_params(n_inputs()))
+        M, S = make_dn_wiring_bilateral()
     lay = feature_layout()
     obs, _ = env.reset(seed=a.seed, options={"map": a.map, "s0": 0.0, "lat": 0.0, "dyaw": 0.0, "v0": 2.0,
                                               "n_obstacles": a.obstacles})
@@ -77,7 +84,7 @@ def main():
                             color="#f28e2b", lw=0.8)
             ax_map.set_xlim(x - 6, x + 6); ax_map.set_ylim(y - 6, y + 6); ax_map.set_aspect("equal")
             ax_map.set_xticks([]); ax_map.set_yticks([])
-            ax_map.set_title(f"{a.map} t={info['t']:.1f}s v={info['speed']:.1f} m/s  (orange: 91° FOV, 7 m)", fontsize=9)
+            ax_map.set_title(f"{a.map} t={info['t']:.1f}s v={info['speed']:.1f} m/s  driver: {driver}", fontsize=9)
             ax_n.clear(); ax_n.imshow(near[-1][:, ::-1], cmap="magma", vmin=0, vmax=0.6, aspect="auto",
                                       interpolation="nearest")
             ax_n.set_title("depth fly eye: nearness 0.25/r (16 x 64, left | right)", fontsize=8)
@@ -97,7 +104,7 @@ def main():
             ax_f.set_xticks([]); ax_f.set_title("optic lobe outputs (HS, VS, LPLC2, LC, L3)", fontsize=8)
             dn = forward_numpy(near[None], P, M, S)[0]
             ax_dn.clear(); ax_dn.bar(np.arange(dn.size), dn, color="#e15759", width=1.0); ax_dn.set_ylim(-1, 1)
-            ax_dn.set_xticks([]); ax_dn.set_title("descending neurons (48) -> linear readout -> steer, speed", fontsize=8)
+            ax_dn.set_xticks([]); ax_dn.set_title("descending neurons: left 20 | right 20 | mid 8  -> linear readout -> steer, speed", fontsize=8)
             fig.canvas.draw()
             frames.append(Image.fromarray(np.asarray(fig.canvas.buffer_rgba())[..., :3])
                           .convert("P", palette=Image.ADAPTIVE, colors=128))
