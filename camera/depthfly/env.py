@@ -30,7 +30,9 @@ class NearHistory(CamHistory):
 
 
 class DepthFlyEnv(MaplessRaceEnv40):
-    def __init__(self, maps=("ifac",), cfg=None, seed=None, sensor_noise=True, randomize=True, tracks=None):
+    def __init__(self, maps=("ifac",), cfg=None, seed=None, sensor_noise=True, randomize=True, tracks=None,
+                 hard_spawn_p=0.0):
+        self.hard_spawn_p = float(hard_spawn_p)
         self.cf = cfg or DepthFlyConfig()
         super().__init__(maps=maps, cfg=self.cf.env, seed=seed, sensor_noise=sensor_noise,
                          randomize=randomize, tracks=tracks)
@@ -46,6 +48,13 @@ class DepthFlyEnv(MaplessRaceEnv40):
 
     def reset(self, *, seed=None, options=None):
         self.eye.reset()
+        # 라인에서 벗어난 출발: 장애물을 피한 뒤 라인 밖에서 코너에 들어가는 상태를 학습에 넣는다
+        # (v3b: ifac 에서 그런 진입 때 벽 정면 충돌). 평가는 lat·dyaw·v0 를 직접 주므로 영향 없음.
+        o = dict(options or {})
+        if self.hard_spawn_p > 0 and not {"lat", "dyaw", "v0"} & o.keys() and self.rng.random() < self.hard_spawn_p:
+            o.update(lat=float(self.rng.uniform(-0.4, 0.4)), dyaw=float(self.rng.normal(0.0, 0.25)),
+                     v0=float(self.rng.uniform(2.0, 4.5)))
+            options = o
         return super().reset(seed=seed, options=options)
 
     def _raw_scan(self):
