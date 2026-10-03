@@ -4,7 +4,7 @@ camfly.ros_node
 실차(Jetson, ROS2) 노드: Orbbec Gemini 2L → 파리 눈 + depth 가짜 스캔 → 커넥톰 정책 → /drive.
 
   ros2 launch orbbec_camera gemini2L.launch.py depth_registration:=true      # OrbbecSDK_ROS2
-  python3 -m camfly.ros_node --ros-args -p model:=best_model.zip
+  python3 -m camera.camfly.ros_node --ros-args -p model:=best_model.zip
 
 구독 (기본값, OrbbecSDK_ROS2 기준 — 실제 이름은 `ros2 topic list` 로 확인):
   /camera/color/image_raw     sensor_msgs/Image (rgb8/bgr8/mono8)   ← 프레임마다 제어 1회 (30 Hz)

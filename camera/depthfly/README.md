@@ -3,7 +3,7 @@
 **Orbbec Gemini 2L 의 depth 영상만** 쓴다. RGB·LiDAR·CNN·MLP·별도 depth 경로 없음.
 depth 를 파리 눈 격자(16×64)의 **가까움 영상**으로 바꿔 광수용체 자리에 넣고, 합성 커넥톰 시각엽을 지난
 하행 뉴런(DN) 48개를 **선형으로 읽어** 조향·속도를 낸다. 과거 3프레임, 30 Hz.
-차량 동역학·보상·레이싱라인(critic 전용)·장애물·평가는 [`mapless40`](../mapless40/RESULTS.md), 카메라 기하·회로 부품은 [`camfly`](../camfly/README.md) 를 쓴다.
+차량 동역학·보상·레이싱라인(critic 전용)·장애물·평가는 [`mapless40`](../../mapless40/RESULTS.md), 카메라 기하·회로 부품은 [`camfly`](../camfly/README.md) 를 쓴다.
 
 ![](results/sim_depth_eye_pp.gif)
 
@@ -53,16 +53,16 @@ critic (학습 전용): 같은 회로 + 레이싱라인·장애물 privileged 27
 ## 3. 사용
 
 ```bash
-python -m depthfly.tests
-python -m depthfly.viz --map ifac --out eye.gif
-python -m depthfly.train --n-envs 4 --subproc --save-dir runs/depthfly --resume auto
-python -m depthfly.evaluate --model runs/depthfly/best_model.zip --maps ifac,roboracer_0817 --obstacles 2
+python -m camera.depthfly.tests
+python -m camera.depthfly.viz --map ifac --out eye.gif
+python -m camera.depthfly.train --n-envs 4 --subproc --save-dir runs/depthfly --resume auto
+python -m camera.depthfly.evaluate --model runs/depthfly/best_model.zip --maps ifac,roboracer_0817 --obstacles 2
 ```
 
 실차 (Jetson):
 ```bash
 ros2 launch orbbec_camera gemini2L.launch.py enable_color:=false depth_fps:=30     # 인자 이름은 드라이버 버전에 맞게
-python3 -m depthfly.ros_node --ros-args -p model:=best_model.zip -p max_speed:=2.0 -p cam_pitch_deg:=-10.0
+python3 -m camera.depthfly.ros_node --ros-args -p model:=best_model.zip -p max_speed:=2.0 -p cam_pitch_deg:=-10.0
 ```
 - `cam_pitch_deg` 는 실제 장착 각도. 높이(0.18 m)를 바꾸면 `CameraSpec.height` 맞추고 재학습.
 - 토픽 이름은 `ros2 topic list` 로 확인 후 `-p depth_topic:=... -p info_topic:=...`.
@@ -74,9 +74,38 @@ python3 -m depthfly.ros_node --ros-args -p model:=best_model.zip -p max_speed:=2
 - **torch 부분 (회로 torch == numpy, SAC 루프, numpy actor == torch) 은 코랩 ④ 에서 처음 돈다.**
 - 학습 결과 아직 없음.
 
-## 5. 알아둘 점 / 다음
+## 5. 시뮬 depth 는 무엇이고, 무엇이 실측이 아닌가
 
-1. 덕트가 33 cm 라 3 m 밖에서는 16행 중 1~2행에만 보인다 (GIF 위 패널의 얇은 띠). 열은 정면 ±15° 를 촘촘히 했듯,
-   **행도 지평선 근처로 몰아주는 것**이 다음 개선 후보.
-2. 규정의 **덕트 사이 틈**, 실측 카메라 지연, 반사·햇빛 구멍을 시뮬에 추가.
-3. 카메라 도착 → rosbag 으로 실제 가까움 영상과 시뮬 비교 (차 안 굴리고).
+| 부분 | 지금 시뮬 | 출처 |
+|--|--|--|
+| 트랙 기하 | LiDAR SLAM 2D 맵 (`maps/`) · 서킷 축소 맵 (`f1tenth_racetracks/`) 의 벽을 **높이 33 cm 덕트**로 세움 | 맵 = 실측(LiDAR), 높이 = 규정 |
+| 장애물 | 원통 r 0.12~0.30 m, 높이 `SceneSpec.obstacle_height` | 가정 |
+| 카메라 | 91°×66°, 높이 0.18 m, 아래로 10°, 차 앞 0.139 m | 사양 + **가정 장착** |
+| depth 오차 | σ = 0.005·d² (4 m 에서 8 cm) | **추정** (비슷한 카메라 사양) |
+| depth 구멍 | 확률 2 % + 15 %·(d/7)² , 칸마다 독립 | **추정** |
+| 지연 | 계산 30 ms | **추정** |
+| 없음 | 덕트 사이 틈, 가장자리 가짜 점, 반사 재질(은박·검정)로 인한 큰 구멍, 햇빛, 진동 | — |
+
+**맵은 LiDAR 맵이 맞다.** 맵은 벽이 어디 있는지(기하)이고 LiDAR 가 카메라보다 정확하다. 실제 카메라 데이터로 맞춰야 하는 건
+**센서 모델**(위 표의 추정 칸)이다. 카메라로 매핑한 공개 레이싱 맵은 찾지 못했다. 카메라가 달린 3D 시뮬레이터
+(AutoDRIVE F1TENTH, Isaac Sim) 는 있지만 입력이 16×64 가까움 영상이라 지금은 이득이 작다 (RGB 를 쓸 때 다시 검토).
+
+## 6. 카메라 오기 전 시뮬 검증 계획
+
+| # | 할 일 | 명령 / 방법 | 통과 기준 |
+|--|--|--|--|
+| 1 | torch 테스트 | `python -m camera.depthfly.tests` | 8/8 |
+| 2 | 시각화 확인 | `python -m camera.depthfly.viz --map roboracer_0817 --obstacles 2 --out x.gif` | 덕트 띠·장애물이 보이고, 바닥·구멍 깜빡임 없음 |
+| 3 | 짧은 학습 | `python -m camera.depthfly.train --timesteps 60000 --learning-starts 5000 --n-envs 4 --save-dir runs/df_smoke` | steps/s 기록, 진행률·보상 상승 |
+| 4 | 본 학습 | 코랩 노트북 또는 `--timesteps 1000000 --resume auto` | `best.json` 갱신 |
+| 5 | 평가 | `python -m camera.depthfly.evaluate --model …/best_model.zip --maps ifac,roboracer_0817 --obstacles 0` (그리고 `2`) | 비교: PP 14.1 s (ifac), mapless40 v3 10.9 s / 팀 맵 9.63 s |
+| 6 | **센서 스트레스 평가 (구현 필요)** | evaluate 에 옵션: 노이즈 ×2·×3, 구멍 ×2, 섹터 통째 구멍, pitch ±3°, 높이 ±2 cm, 지연 +30 ms | 어느 조건에서 무너지는지 표 |
+| 7 | 행 배치 개선 (구현 필요) | 행을 지평선 근처로 몰기 (열의 정면 ±15° 처럼) → 재학습 | 5·6 결과가 나아지는지 |
+| 8 | 시뮬 보강 (구현 필요) | 덕트 사이 틈, 가장자리 가짜 점 | 학습이 여전히 되는지 |
+
+## 7. 카메라 도착 후
+
+1. **정지 측정**: 덕트를 1·2·3·5·7 m 에 두고 depth 기록 → 거리별 σ, 구멍 비율. 실제 덕트 재질로.
+2. **주행 녹화**: 카메라 + LiDAR 같이 달고 수동으로 몇 바퀴, rosbag (`/camera/depth/*`, `/scan`, `/imu/data`, `/vehicle/speed_mps`).
+3. **비교 스크립트 (구현 필요)**: bag → `DepthEyeReal` 가까움 영상 vs 같은 시각 LiDAR 로 만든 가까움 → 칸별 오차·구멍 지도 → `CameraSpec` 값 맞춤.
+4. 실제 vs 보정된 시뮬 영상 GIF 나란히 → 재학습 → 실차 `max_speed:=2.0`.

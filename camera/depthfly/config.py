@@ -10,7 +10,7 @@ Gemini 2L depth 한 대 + 초파리 커넥톰. 카메라·장면·차량 설정�
 
 from __future__ import annotations
 
-from camfly.config import CamFlyConfig, CameraSpec, SceneSpec, state_dim  # noqa: F401
+from camera.camfly.config import CamFlyConfig, CameraSpec, SceneSpec, state_dim  # noqa: F401
 
 
 def DepthFlyConfig(fps: float = 30.0, hist: int = 3) -> CamFlyConfig:  # noqa: N802

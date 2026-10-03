@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from camfly.config import CameraSpec, SceneSpec
-from camfly.eye import FlyEyeRenderer, eye_pixel_map
+from camera.camfly.config import CameraSpec, SceneSpec
+from camera.camfly.eye import FlyEyeRenderer, eye_pixel_map
 
 NEAR_REF = 0.25
 

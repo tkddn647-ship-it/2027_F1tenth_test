@@ -1,8 +1,8 @@
 """
 depthfly.viz — depth 파리 눈이 보는 것 + 회로 활동 GIF (torch 불필요)
 
-  python -m depthfly.viz --map ifac --out depthfly.gif                    # 학습 전 (pure pursuit 주행, 초기 회로)
-  python -m depthfly.viz --map ifac --model best_model.zip --out run.gif   # 학습된 정책이 운전
+  python -m camera.depthfly.viz --map ifac --out depthfly.gif                    # 학습 전 (pure pursuit 주행, 초기 회로)
+  python -m camera.depthfly.viz --map ifac --model best_model.zip --out run.gif   # 학습된 정책이 운전
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@ depthfly.train
 ============
 depth 카메라 + 초파리 커넥톰만 쓰는 정책 SAC 학습.
 
-  python -m depthfly.train --timesteps 1000000 --n-envs 4 --subproc \
+  python -m camera.depthfly.train --timesteps 1000000 --n-envs 4 --subproc \
       --save-dir runs/depthfly --resume auto --time-limit-min 150
 
 mapless40.train 의 평가·저장·이어 학습 콜백을 그대로 쓴다.

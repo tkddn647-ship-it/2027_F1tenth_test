@@ -2,7 +2,7 @@
 
 LiDAR 없이 **Orbbec Gemini 2L** 한 대로 달린다. 정책은 CNN·MLP 대신 **초파리 시각엽 회로(합성 커넥톰)** 를 지나
 하행 뉴런(DN) 활동을 **선형으로 읽어** 조향·속도를 낸다. 차량 동역학·보상·레이싱라인(critic 전용)·장애물·평가·저장은
-[`mapless40`](../mapless40/RESULTS.md) 를 그대로 쓴다.
+[`mapless40`](../../mapless40/RESULTS.md) 를 그대로 쓴다.
 
 ![](results/sim_eye_pp.gif)
 
@@ -51,16 +51,16 @@ critic (학습 전용): 같은 구조 + 레이싱라인·장애물 privileged 27
 ## 3. 사용
 
 ```bash
-python -m camfly.tests                     # numpy 5개 (+ torch 2개)
-python -m camfly.viz --map ifac --out eye.gif
-python -m camfly.train --encoder fly --n-envs 4 --subproc --save-dir runs/camfly_fly --resume auto
-python -m camfly.evaluate --model runs/camfly_fly/best_model.zip --maps ifac,roboracer_0817 --obstacles 2
+python -m camera.camfly.tests                     # numpy 5개 (+ torch 2개)
+python -m camera.camfly.viz --map ifac --out eye.gif
+python -m camera.camfly.train --encoder fly --n-envs 4 --subproc --save-dir runs/camfly_fly --resume auto
+python -m camera.camfly.evaluate --model runs/camfly_fly/best_model.zip --maps ifac,roboracer_0817 --obstacles 2
 ```
 
 실차 (Jetson):
 ```bash
 ros2 launch orbbec_camera gemini2L.launch.py depth_registration:=true    # OrbbecSDK_ROS2, 토픽 이름 확인
-python3 -m camfly.ros_node --ros-args -p model:=best_model.zip -p max_speed:=2.0 -p cam_pitch_deg:=-10.0
+python3 -m camera.camfly.ros_node --ros-args -p model:=best_model.zip -p max_speed:=2.0 -p cam_pitch_deg:=-10.0
 ```
 - 노출 **고정·짧게(≤ 2 ms)**, 자동 화이트밸런스 끄기. 시뮬은 밝기를 랜덤화해 학습했다.
 - `cam_pitch_deg` 는 실제 장착 각도로. 카메라 높이를 바꾸면 `CameraSpec.height` 도 맞추고 재학습.

@@ -1,5 +1,7 @@
 # robo_testr
 
+> **현재 작업 현황·다음 할 일은 [CLAUDE.md](CLAUDE.md)** (mapless40 = LiDAR, 카메라 작업은 [`camera/`](camera/README.md)). 아래는 초기 레거시 설명.
+
 초파리 **hemibrain 커넥톰**을 **시간축 temporal memory**로 학습하는  
 **SAC** 기반 F1TENTH **mapless 관측** 레이싱 레포.  
 학습·추론은 **GPU(CUDA / Jetson)** 우선, CPU는 폴백.

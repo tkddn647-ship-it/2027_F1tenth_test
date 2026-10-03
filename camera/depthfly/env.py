@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 from gymnasium import spaces
 
-from camfly.env import CamHistory
+from camera.camfly.env import CamHistory
 from mapless40.config import PRIV_DIM
 from mapless40.env import MaplessRaceEnv40
 

@@ -4,7 +4,7 @@ depthfly.ros_node
 실차(Jetson, ROS2): Orbbec Gemini 2L **depth 만** → 파리 눈 가까움 영상 → 커넥톰 → /drive.  RGB 안 씀.
 
   ros2 launch orbbec_camera gemini2L.launch.py enable_color:=false depth_fps:=30     # OrbbecSDK_ROS2
-  python3 -m depthfly.ros_node --ros-args -p model:=best_model.zip -p max_speed:=2.0
+  python3 -m camera.depthfly.ros_node --ros-args -p model:=best_model.zip -p max_speed:=2.0
 
 구독 (OrbbecSDK_ROS2 기본 이름 — 실제 이름은 `ros2 topic list` 로 확인):
   /camera/depth/image_raw     sensor_msgs/Image (16UC1 mm 또는 32FC1 m)   ← 프레임마다 제어 1회 (30 Hz)

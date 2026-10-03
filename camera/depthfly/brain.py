@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from camfly.flybrain import DIR_NAMES, DIRS, _pool_np, _shift_np, _softplus, make_dn_wiring
+from camera.camfly.flybrain import DIR_NAMES, DIRS, _pool_np, _shift_np, _softplus, make_dn_wiring
 
 N_SECT, N_BAND = 8, 2
 
@@ -83,7 +83,7 @@ try:
     import torch.nn as nn
     import torch.nn.functional as F
 
-    from camfly.flybrain import _pool_t, _shift_t
+    from camera.camfly.flybrain import _pool_t, _shift_t
 except ImportError:  # pragma: no cover
     torch = None
 

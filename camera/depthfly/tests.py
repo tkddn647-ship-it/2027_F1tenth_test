@@ -1,5 +1,5 @@
 """
-depthfly.tests  —  python -m depthfly.tests
+depthfly.tests  —  python -m camera.depthfly.tests
 numpy 테스트 (어디서나) + torch 테스트 (코랩: 회로 torch == numpy, SAC 학습 루프, numpy actor == torch actor).
 """
 
@@ -12,7 +12,7 @@ import traceback
 
 import numpy as np
 
-from camfly.tests import _wall_grid
+from camera.camfly.tests import _wall_grid
 
 from .brain import feature_layout, features_numpy, forward_numpy, init_params, make_dn_wiring, n_inputs
 from .config import CameraSpec, DepthFlyConfig, SceneSpec, state_dim

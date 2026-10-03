@@ -3,7 +3,7 @@ camfly.train
 ============
 카메라(파리 눈 + depth) + 초파리 커넥톰 정책 SAC 학습.
 
-  python -m camfly.train --encoder fly --timesteps 1000000 --n-envs 4 --subproc \
+  python -m camera.camfly.train --encoder fly --timesteps 1000000 --n-envs 4 --subproc \
       --save-dir runs/camfly_fly --resume auto --time-limit-min 150
 
 mapless40.train 의 평가·저장·이어 학습 콜백을 그대로 쓴다.
