@@ -1,5 +1,5 @@
 """
-camfly.tests  —  python -m camfly.tests [--quick]
+camfly.tests  —  python -m camera.camfly.tests [--quick]
 numpy 테스트(여기서도 돎) + torch 테스트(코랩에서 확인: 커넥톰 torch == numpy, SAC 학습 루프, numpy actor == torch actor).
 """
 

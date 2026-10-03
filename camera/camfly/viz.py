@@ -3,8 +3,8 @@ camfly.viz
 ==========
 시뮬 카메라가 무엇을 보는지 GIF 로.  (torch 불필요)
 
-  python -m camfly.viz --map ifac --driver pp --seconds 8 --out eye.gif
-  python -m camfly.viz --map ifac --model best_model.zip --out eye.gif     # 학습 모델 (torch 필요)
+  python -m camera.camfly.viz --map ifac --driver pp --seconds 8 --out eye.gif
+  python -m camera.camfly.viz --map ifac --model best_model.zip --out eye.gif     # 학습 모델 (torch 필요)
 
 왼쪽: 트랙 + 시야 부채꼴 + depth 가짜 스캔 점
 오른쪽 위: 파리 눈 원본 밝기 (16×64, 정면 ±15° 가 가운데 절반)

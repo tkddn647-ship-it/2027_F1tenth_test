@@ -1,6 +1,6 @@
 # robo_testr
 
-> **현재 작업 현황·다음 할 일은 [CLAUDE.md](CLAUDE.md)** (mapless40 = LiDAR, depthfly = depth 카메라 + 초파리 커넥톰). 아래는 초기 레거시 설명.
+> **현재 작업 현황·다음 할 일은 [CLAUDE.md](CLAUDE.md)** (mapless40 = LiDAR, 카메라 작업은 [`camera/`](camera/README.md)). 아래는 초기 레거시 설명.
 
 초파리 **hemibrain 커넥톰**을 **시간축 temporal memory**로 학습하는  
 **SAC** 기반 F1TENTH **mapless 관측** 레이싱 레포.  

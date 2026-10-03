@@ -3,7 +3,7 @@
 **Orbbec Gemini 2L 의 depth 영상만** 쓴다. RGB·LiDAR·CNN·MLP·별도 depth 경로 없음.
 depth 를 파리 눈 격자(16×64)의 **가까움 영상**으로 바꿔 광수용체 자리에 넣고, 합성 커넥톰 시각엽을 지난
 하행 뉴런(DN) 48개를 **선형으로 읽어** 조향·속도를 낸다. 과거 3프레임, 30 Hz.
-차량 동역학·보상·레이싱라인(critic 전용)·장애물·평가는 [`mapless40`](../mapless40/RESULTS.md), 카메라 기하·회로 부품은 [`camfly`](../camfly/README.md) 를 쓴다.
+차량 동역학·보상·레이싱라인(critic 전용)·장애물·평가는 [`mapless40`](../../mapless40/RESULTS.md), 카메라 기하·회로 부품은 [`camfly`](../camfly/README.md) 를 쓴다.
 
 ![](results/sim_depth_eye_pp.gif)
 
@@ -53,16 +53,16 @@ critic (학습 전용): 같은 회로 + 레이싱라인·장애물 privileged 27
 ## 3. 사용
 
 ```bash
-python -m depthfly.tests
-python -m depthfly.viz --map ifac --out eye.gif
-python -m depthfly.train --n-envs 4 --subproc --save-dir runs/depthfly --resume auto
-python -m depthfly.evaluate --model runs/depthfly/best_model.zip --maps ifac,roboracer_0817 --obstacles 2
+python -m camera.depthfly.tests
+python -m camera.depthfly.viz --map ifac --out eye.gif
+python -m camera.depthfly.train --n-envs 4 --subproc --save-dir runs/depthfly --resume auto
+python -m camera.depthfly.evaluate --model runs/depthfly/best_model.zip --maps ifac,roboracer_0817 --obstacles 2
 ```
 
 실차 (Jetson):
 ```bash
 ros2 launch orbbec_camera gemini2L.launch.py enable_color:=false depth_fps:=30     # 인자 이름은 드라이버 버전에 맞게
-python3 -m depthfly.ros_node --ros-args -p model:=best_model.zip -p max_speed:=2.0 -p cam_pitch_deg:=-10.0
+python3 -m camera.depthfly.ros_node --ros-args -p model:=best_model.zip -p max_speed:=2.0 -p cam_pitch_deg:=-10.0
 ```
 - `cam_pitch_deg` 는 실제 장착 각도. 높이(0.18 m)를 바꾸면 `CameraSpec.height` 맞추고 재학습.
 - 토픽 이름은 `ros2 topic list` 로 확인 후 `-p depth_topic:=... -p info_topic:=...`.
@@ -94,11 +94,11 @@ python3 -m depthfly.ros_node --ros-args -p model:=best_model.zip -p max_speed:=2
 
 | # | 할 일 | 명령 / 방법 | 통과 기준 |
 |--|--|--|--|
-| 1 | torch 테스트 | `python -m depthfly.tests` | 8/8 |
-| 2 | 시각화 확인 | `python -m depthfly.viz --map roboracer_0817 --obstacles 2 --out x.gif` | 덕트 띠·장애물이 보이고, 바닥·구멍 깜빡임 없음 |
-| 3 | 짧은 학습 | `python -m depthfly.train --timesteps 60000 --learning-starts 5000 --n-envs 4 --save-dir runs/df_smoke` | steps/s 기록, 진행률·보상 상승 |
+| 1 | torch 테스트 | `python -m camera.depthfly.tests` | 8/8 |
+| 2 | 시각화 확인 | `python -m camera.depthfly.viz --map roboracer_0817 --obstacles 2 --out x.gif` | 덕트 띠·장애물이 보이고, 바닥·구멍 깜빡임 없음 |
+| 3 | 짧은 학습 | `python -m camera.depthfly.train --timesteps 60000 --learning-starts 5000 --n-envs 4 --save-dir runs/df_smoke` | steps/s 기록, 진행률·보상 상승 |
 | 4 | 본 학습 | 코랩 노트북 또는 `--timesteps 1000000 --resume auto` | `best.json` 갱신 |
-| 5 | 평가 | `python -m depthfly.evaluate --model …/best_model.zip --maps ifac,roboracer_0817 --obstacles 0` (그리고 `2`) | 비교: PP 14.1 s (ifac), mapless40 v3 10.9 s / 팀 맵 9.63 s |
+| 5 | 평가 | `python -m camera.depthfly.evaluate --model …/best_model.zip --maps ifac,roboracer_0817 --obstacles 0` (그리고 `2`) | 비교: PP 14.1 s (ifac), mapless40 v3 10.9 s / 팀 맵 9.63 s |
 | 6 | **센서 스트레스 평가 (구현 필요)** | evaluate 에 옵션: 노이즈 ×2·×3, 구멍 ×2, 섹터 통째 구멍, pitch ±3°, 높이 ±2 cm, 지연 +30 ms | 어느 조건에서 무너지는지 표 |
 | 7 | 행 배치 개선 (구현 필요) | 행을 지평선 근처로 몰기 (열의 정면 ±15° 처럼) → 재학습 | 5·6 결과가 나아지는지 |
 | 8 | 시뮬 보강 (구현 필요) | 덕트 사이 틈, 가장자리 가짜 점 | 학습이 여전히 되는지 |

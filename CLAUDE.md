@@ -10,11 +10,13 @@ F1TENTH / Roboracer 2026 (아주대). **맵·위치추정 없이(mapless) 센서
 
 ## 1. 지금 살아 있는 세 갈래
 
+**카메라 작업은 전부 [`camera/`](camera/README.md) 폴더 안에서.** LiDAR 는 루트 `mapless40/`.
+
 | 폴더 | 센서 | 정책 | 상태 |
 |--|--|--|--|
 | [`mapless40/`](mapless40/RESULTS.md) | LiDAR 1125빔 40 Hz + IMU + 속도 | 1D CNN → MLP (SAC, asymmetric) | **학습 완료(v3), 실차 시험 대기.** v4 (횡가속 4.5 제한) 코랩에서 이어 학습 중 |
-| [`camfly/`](camfly/README.md) | Gemini 2L RGB(흑백) + depth 스캔 | 합성 초파리 커넥톰 (비교: 작은 CNN) | 구조만. 학습 안 함 |
-| [`depthfly/`](depthfly/README.md) | **Gemini 2L depth 만** | **초파리 커넥톰만** (CNN·MLP 없음) | **현재 주력.** numpy 테스트 6/6, torch 테스트·학습 아직 |
+| [`camera/camfly/`](camera/camfly/README.md) | Gemini 2L RGB(흑백) + depth 스캔 | 합성 초파리 커넥톰 (비교: 작은 CNN) | 구조만. 학습 안 함 |
+| [`camera/depthfly/`](camera/depthfly/README.md) | **Gemini 2L depth 만** | **초파리 커넥톰만** (CNN·MLP 없음) | **현재 주력.** numpy 테스트 6/6, torch 테스트·학습 아직 |
 
 레포 루트의 옛 파일들(`train_sac_*.py`, `f1tenth_mapless_env.py`, `connectome_*.py`, `watch_*.py` …)은 **레거시**. 새 작업에 쓰지 말 것.
 `Roboracer-2026-main/` = 실차 ROS2 스택 (control_node, 센서, TF). `realcar/` = mapless40 실차 실행 스크립트. `sim_ros2/` = f1tenth_gym_ros 브리지.
@@ -23,11 +25,11 @@ F1TENTH / Roboracer 2026 (아주대). **맵·위치추정 없이(mapless) 센서
 
 ```bash
 pip install torch "stable-baselines3>=2.3" "gymnasium>=0.29" numpy scipy pyyaml pillow matplotlib tensorboard
-python -m depthfly.tests          # numpy 6 + torch 2  (torch 있으면 8개 다 돌아야 정상)
-python -m camfly.tests
+python -m camera.depthfly.tests          # numpy 6 + torch 2  (torch 있으면 8개 다 돌아야 정상)
+python -m camera.camfly.tests
 python -m mapless40.tests
 ```
-- 모든 명령은 **레포 루트에서 `python -m 패키지.모듈`** 로 (패키지 간 import: depthfly → camfly → mapless40).
+- 모든 명령은 **레포 루트에서 `python -m 패키지.모듈`** 로 (패키지 간 import: camera.depthfly → camera.camfly → mapless40).
 - Windows: `--subproc` (SubprocVecEnv) 은 `if __name__ == "__main__"` 가드가 있어 동작해야 하지만, 문제가 나면 `--subproc` 빼고 실행.
 - 맵: `maps/` (팀 맵 `roboracer_0817`, `ifac_roboracer` 등, 전부 LiDAR SLAM 2D 지도) + `f1tenth_racetracks/` (Spielberg, Silverstone, Monza … 실제 서킷 축소, 센서로 만든 것 아님).
   맵 지정 `"이름:가중치"` 예: `ifac:3,roboracer_0817:3,Spielberg:1`.
@@ -44,7 +46,7 @@ python -m mapless40.tests
 - 학습 저장: `--save-dir` 에 `last_model.zip`(원자적 저장), `best_model.zip`, `best.json`(평가 조건 태그). `--resume auto` 로 이어 학습
   (이어 할 때 워밍업은 랜덤이 아니라 **정책 행동**으로 — `_PolicyWarmupSAC`).
 
-## 4. depthfly 요약 (자세히: [depthfly/README.md](depthfly/README.md))
+## 4. depthfly 요약 (자세히: [camera/depthfly/README.md](camera/depthfly/README.md))
 
 ```
 depth (Gemini 2L, 30 fps) → 파리 눈 격자 16×64 '가까움' = 0.25 m / 수평거리 (바닥 제거, 7 m 밖·구멍 = 0, 구멍 2프레임 유지)
@@ -66,11 +68,11 @@ depth (Gemini 2L, 30 fps) → 파리 눈 격자 16×64 '가까움' = 0.25 m / �
 ## 6. 다음 할 일 (우선순위)
 
 ### depthfly — 카메라 오기 전 시뮬 검증
-1. **torch 테스트**: `python -m depthfly.tests` → 8/8 (회로 torch == numpy, SAC 루프, numpy actor == torch). 실패하면 여기부터.
-2. **짧은 학습 확인**: `python -m depthfly.train --timesteps 60000 --learning-starts 5000 --n-envs 4 --save-dir runs/df_smoke`
+1. **torch 테스트**: `python -m camera.depthfly.tests` → 8/8 (회로 torch == numpy, SAC 루프, numpy actor == torch). 실패하면 여기부터.
+2. **짧은 학습 확인**: `python -m camera.depthfly.train --timesteps 60000 --learning-starts 5000 --n-envs 4 --save-dir runs/df_smoke`
    → steps/s 기록, 에피소드 보상·진행률이 오르는지.
-3. **본 학습**: 코랩 `depthfly/colab_train.ipynb` 또는 로컬 `--timesteps 1000000 --resume auto`.
-4. **평가**: `python -m depthfly.evaluate --model runs/.../best_model.zip --maps ifac,roboracer_0817 --obstacles 0` 와 `--obstacles 2`.
+3. **본 학습**: 코랩 `camera/depthfly/colab_train.ipynb` 또는 로컬 `--timesteps 1000000 --resume auto`.
+4. **평가**: `python -m camera.depthfly.evaluate --model runs/.../best_model.zip --maps ifac,roboracer_0817 --obstacles 0` 와 `--obstacles 2`.
    비교 기준: pure pursuit ifac 14.1 s (depthfly env), mapless40 v3 ifac 10.9 s / 팀 맵 9.63 s.
 5. **센서 스트레스 평가 (구현 필요)**: evaluate 에 옵션 추가 — 노이즈 ×2·×3, 구멍 ×2, **섹터 통째 구멍**(은박·검정 덕트 반사 가정),
    pitch ±3°, 높이 ±2 cm, 지연 +30 ms. 어느 조건에서 무너지는지 표로.
