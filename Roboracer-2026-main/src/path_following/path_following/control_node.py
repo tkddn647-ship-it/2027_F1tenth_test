@@ -595,6 +595,13 @@ class VehicleControlNode(Node):
     def _is_autonomous_mode(self) -> bool:
         if self._last_rc_time <= 0.0:
             return False
+        # RC 신호가 끊기면 마지막 CH5 값으로 AUTO 를 유지하지 않는다 → MANUAL (RC 끊김이면 duty 0).
+        # 이게 없으면 조종기가 꺼져도 모델이 계속 운전하고 CH6 ESTOP 도 못 받는다.
+        if time.time() - self._last_rc_time > self._rc_timeout:
+            if self._mode_auto_latched:
+                self.get_logger().warn("RC 신호 끊김 → AUTO 해제 (정지)")
+            self._mode_auto_latched = False
+            return False
         ch5 = self._rc_ch5
         if ch5 <= 0:
             return self._mode_auto_latched
