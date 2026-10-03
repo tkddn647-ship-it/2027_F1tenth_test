@@ -28,10 +28,11 @@ def main():
     p.add_argument("--laps", type=int, default=3)
     p.add_argument("--obstacles", type=int, default=0)
     p.add_argument("--max-s", type=float, default=60.0)
+    from .config import DepthFlyConfig, add_cfg_args
+    add_cfg_args(p)
     a = p.parse_args()
-    from .config import DepthFlyConfig
     from .env import DepthFlyEnv
-    cf = DepthFlyConfig()
+    cf = DepthFlyConfig(v_max=a.v_max, brake=a.brake)
     cf.env.max_episode_s = a.max_s
     maps = [m for m in a.maps.split(",") if m]
     env = DepthFlyEnv(maps=maps, cfg=cf, seed=0, randomize=False)

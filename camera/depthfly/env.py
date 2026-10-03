@@ -45,7 +45,7 @@ class DepthFlyEnv(MaplessRaceEnv40):
         })
 
     def reset(self, *, seed=None, options=None):
-        self.eye.hold.reset()
+        self.eye.reset()
         return super().reset(seed=seed, options=options)
 
     def _raw_scan(self):

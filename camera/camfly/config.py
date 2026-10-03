@@ -19,7 +19,8 @@ from mapless40.config import EnvConfig
 
 @dataclass
 class CameraSpec:
-    """Gemini 2L (RGB·IR 글로벌 셔터, 베이스라인 100 mm, depth 최적 0.25~7 m, 4 m 에서 <2%)."""
+    """Gemini 2L 데이터시트 v1.0: RGB·IR 글로벌 셔터, 베이스라인 100 mm, depth 91°×66°, 0.25~10 m (최적 0.30~7.0 m),
+    정확도 ≤ 2 % (1280×800, 2 m, 반사율 > 80 % 평면의 RMS). 지연은 데이터시트에 없음."""
 
     # 장착 (뒷바퀴축 기준 0.31 m 앞 = CG 기준 0.139 m, mapless40 LiDAR 자리)
     mount_x: float = 0.139
@@ -32,12 +33,21 @@ class CameraSpec:
     n_rows: int = 16
     acute_half_deg: float = 15.0        # 정면 ±15° 에 열의 절반을 몰아줌
     acute_frac: float = 0.5
+    # 세로 acute zone: 0 이면 균일 (camfly). depthfly 는 지평선 ±row_acute_half 에 행을 몰아줌
+    row_acute_half_deg: float = 0.0
+    row_acute_frac: float = 0.75
     # depth 가짜 스캔
     depth_max: float = 7.0              # 최적 범위 끝
-    depth_k: float = 0.005              # σ ≈ k·d² [m]  (4 m 에서 8 cm = 2%)
+    depth_min: float = 0.25             # 이보다 가까우면 측정 없음 (데이터시트 최소 거리)
+    depth_k: float = 0.01               # σ ≈ k·d² [m]  (데이터시트 상한 2 % @ 2 m = 4 cm 에 맞춤. 스테레오 오차 ∝ d²)
     depth_hole_p0: float = 0.02         # 기본 구멍 확률
     depth_hole_p1: float = 0.15         # + p1·(d/depth_max)²  (멀수록·균일한 면일수록 구멍)
     min_obj_height: float = 0.05        # 바닥보다 이만큼 높은 점만 장애물로
+    # depthfly: 높이 판정 (시뮬·실차 공통) 과 장착 pitch 오차 (시뮬)
+    floor_margin_deg: float = 1.5       # 높이 기준을 거리에 따라 늘림: min_obj_height + d·tan(이 각) (pitch 오차 여유)
+    max_obj_height: float = 0.40        # 이보다 높은 점은 버림 (덕트 너머 배경 벽·사람)
+    pitch_err_deg: float = 1.0          # [추정] 에피소드마다 장착·자세 pitch 오차 ±
+    pitch_jitter_deg: float = 0.3       # [추정] 프레임마다 흔들림 σ (가감속·진동)
 
     @property
     def hfov(self) -> float:
@@ -63,7 +73,18 @@ class CameraSpec:
     def row_elevations(self) -> np.ndarray:
         """행별 고도각 [rad] (차체 수평 기준, 위 +). 행 0 = 위쪽."""
         p, v = math.radians(self.pitch_deg), self.vfov / 2.0
-        return (p + np.linspace(v, -v, self.n_rows)).astype(np.float64)
+        if self.row_acute_half_deg <= 0.0:
+            return (p + np.linspace(v, -v, self.n_rows)).astype(np.float64)
+        # 지평선 기준 대칭: ±a 안에 row_acute_frac 만큼의 행, 나머지는 시야 끝(±lim)까지
+        n = self.n_rows
+        n_in = int(round(n * self.row_acute_frac)) // 2 * 2
+        n_out = (n - n_in) // 2
+        a, lim = math.radians(self.row_acute_half_deg), v - abs(p)
+        inner = np.linspace(a, -a, n_in)
+        up = np.linspace(lim, a, n_out + 1)[:-1]
+        el = np.concatenate([up, inner, -up[::-1]])
+        assert el.size == n and lim > a, (el.size, lim, a)
+        return el.astype(np.float64)
 
 
 @dataclass

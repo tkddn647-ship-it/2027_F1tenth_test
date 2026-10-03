@@ -1,5 +1,7 @@
 # CLAUDE.md — 이 레포에서 작업할 때 먼저 읽을 것
 
+전체 진행 보고서(그림·GIF): [REPORT.md](REPORT.md)
+
 F1TENTH / Roboracer 2026 (아주대). **맵·위치추정 없이(mapless) 센서 → 강화학습 정책 → `/drive`** 로 달리는 것이 목표.
 실차 컴퓨터 Jetson Orin Nano (6코어, 추론은 torch 없이 numpy). 학습은 Colab 무료 T4 (노트북 확보 후 로컬도).
 사용자와는 **한국어**로, 헷갈리지 않게 짧고 정확하게. 추정값과 실측값을 섞어 말하지 말 것.
@@ -16,7 +18,7 @@ F1TENTH / Roboracer 2026 (아주대). **맵·위치추정 없이(mapless) 센서
 |--|--|--|--|
 | [`mapless40/`](mapless40/RESULTS.md) | LiDAR 1125빔 40 Hz + IMU + 속도 | 1D CNN → MLP (SAC, asymmetric) | **학습 완료(v3), 실차 시험 대기.** v4 (횡가속 4.5 제한) 코랩에서 이어 학습 중 |
 | [`camera/camfly/`](camera/camfly/README.md) | Gemini 2L RGB(흑백) + depth 스캔 | 합성 초파리 커넥톰 (비교: 작은 CNN) | 구조만. 학습 안 함 |
-| [`camera/depthfly/`](camera/depthfly/README.md) | **Gemini 2L depth 만** | **초파리 커넥톰만** (CNN·MLP 없음) | **현재 주력.** numpy 테스트 6/6, torch 테스트·학습 아직 |
+| [`camera/depthfly/`](camera/depthfly/README.md) | **Gemini 2L depth 만** | **초파리 커넥톰만** (CNN·MLP 없음) | **현재 주력.** 테스트 9/9 (torch 포함), 관측 정의 v2, 학습 아직 |
 
 레포 루트의 옛 파일들(`train_sac_*.py`, `f1tenth_mapless_env.py`, `connectome_*.py`, `watch_*.py` …)은 **레거시**. 새 작업에 쓰지 말 것.
 `Roboracer-2026-main/` = 실차 ROS2 스택 (control_node, 센서, TF). `realcar/` = mapless40 실차 실행 스크립트. `sim_ros2/` = f1tenth_gym_ros 브리지.
@@ -25,7 +27,7 @@ F1TENTH / Roboracer 2026 (아주대). **맵·위치추정 없이(mapless) 센서
 
 ```bash
 pip install torch "stable-baselines3>=2.3" "gymnasium>=0.29" numpy scipy pyyaml pillow matplotlib tensorboard
-python -m camera.depthfly.tests          # numpy 6 + torch 2  (torch 있으면 8개 다 돌아야 정상)
+python -m camera.depthfly.tests          # numpy 7 + torch 2  (torch 있으면 9개 다 돌아야 정상)
 python -m camera.camfly.tests
 python -m mapless40.tests
 ```
@@ -41,7 +43,7 @@ python -m mapless40.tests
 - **SAC asymmetric actor-critic** (`mapless40/policy.py` `AsymSACPolicy`): actor 는 센서·상태만, critic 은 추가로
   **privileged 27** (레이싱라인 오차·곡률·v_ref, 앞 장애물). 레이싱라인은 **학습 신호로만** 쓰이고 실차에는 없다.
 - 센서별 환경 = `MaplessRaceEnv40` 상속 후 `_raw_scan()` 만 바꿈 → `self.hist.push(frame, v̄, ω̄, ω_latest, dt)` → `observation(priv)`.
-- 행동: 조향 ±21.4°, 속도 2~5 m/s (실차 배터리 한계 6 m/s). 실차는 `max_speed` 파라미터로 더 낮춤 (처음 2.0).
+- 행동: 조향 ±21.4°, 속도 mapless40 2~5 m/s, **depthfly 2~8 m/s** (`--v-max`, 능동 브레이크는 `--brake`). 실차 최고 속도는 7 m/s (사용자 확인, 2026-10-03), 8 은 여유분. 실차는 `max_speed` 파라미터로 더 낮춤 (처음 2.0).
 - 배포: 학습 zip → `*/np_actor.py` (torch 없이, `mapless40.np_actor.load_sb3_zip`) → `*/ros_node.py`.
 - 학습 저장: `--save-dir` 에 `last_model.zip`(원자적 저장), `best_model.zip`, `best.json`(평가 조건 태그). `--resume auto` 로 이어 학습
   (이어 할 때 워밍업은 랜덤이 아니라 **정책 행동**으로 — `_PolicyWarmupSAC`).
@@ -49,13 +51,17 @@ python -m mapless40.tests
 ## 4. depthfly 요약 (자세히: [camera/depthfly/README.md](camera/depthfly/README.md))
 
 ```
-depth (Gemini 2L, 30 fps) → 파리 눈 격자 16×64 '가까움' = 0.25 m / 수평거리 (바닥 제거, 7 m 밖·구멍 = 0, 구멍 2프레임 유지)
-  × 최근 3프레임 → lamina ON/OFF → T4/T5 (4방향) → HS/VS 32, LPLC2 8, LC 32, L3 24  (= 96)
-  → DN 48 (고정 희소 배선 fan-in 12, 부호 고정, 세기만 학습) → tanh ‖ 상태 14 → 선형 읽기 → (조향, 속도)
+depth (Gemini 2L, 30 fps) → 파리 눈 격자 16×64 '가까움' = 0.25 m / 수평거리 (12행은 지평선 ±8°, 높이 판정, 7 m 밖·구멍 = 0, 구멍 2프레임 유지)
+  × 최근 3프레임 → lamina ON/OFF (대비 적응 Δ/(|Δ|+0.01)) → T4/T5 (4방향) → HS/VS 32, LPLC2 8, LC 32, L3 24  (= 96)
+  → DN 48 (좌우 대칭 배선 fan-in 12: 같은 쪽 흥분·반대쪽 억제, 세기만 학습) → tanh ‖ 상태 14 → 선형 읽기 → (조향, 속도)
+  LPLC2 = 가까움 증가율 Δn/n (v3). 극성 검사: python -m camera.depthfly.polarity (11/11)
 ```
-- 30 Hz 인 이유: Gemini 2L depth 최대 30 fps. γ = 0.99^(10/30).
-- 시뮬 depth 는 **2D 맵의 벽을 33 cm 덕트로 세워** 레이캐스팅 + 추정 오차(σ = 0.005·d², 구멍 2% + 15%·(d/7)²). **실측 아님.**
+- 30 Hz 인 이유: Gemini 2L depth Unbinned 모드 최대 30 fps (Binned Sparse 는 640×400 60 fps, 최적 범위 5 m). γ = 0.99^(10/30).
+- 시뮬 depth 는 **2D 맵의 벽을 33 cm 덕트로 세워** 레이캐스팅 + 오차(σ = 0.01·d² = 데이터시트 상한 2 % @ 2 m, 구멍 2% + 15%·(d/7)² 는 추정). **실측 아님.**
+- **관측 정의 v2** (행 재배치·거리 비례 높이 판정·lamina 대비 적응 + 경로별 고정 이득·실차 칸 중앙값·시뮬 pitch 오차). v2 이전 모델과 호환 안 됨, 코랩 저장 폴더 `depthfly_v2`.
 - Jetson 부하: 칸 샘플링 ~2 ms + 회로 ~0.5 ms (클라우드 CPU 측정).
+- **v3**: v2 를 처음부터 SAC → 10만 스텝에 평가 0.2~0.3바퀴. → 극성 수정(LPLC2 거꾸로, DN 부호 랜덤 → 좌우 대칭) + **레이싱라인 모방학습(DAgger, `bc.py`) → SAC (`--bc-init`, critic 먼저 3만 스텝, ent 0.02)**.
+  모방학습만으로 5/8 출발이 3바퀴 완주 (ifac 12.8 s, 팀 맵 11.5 s). 결과 `camera/depthfly/results/bc_init_v3.npz`. 코랩 저장 폴더 `depthfly_v3`.
 
 ## 5. 결정된 것 (사용자와 합의)
 
@@ -68,17 +74,19 @@ depth (Gemini 2L, 30 fps) → 파리 눈 격자 16×64 '가까움' = 0.25 m / �
 ## 6. 다음 할 일 (우선순위)
 
 ### depthfly — 카메라 오기 전 시뮬 검증
-1. **torch 테스트**: `python -m camera.depthfly.tests` → 8/8 (회로 torch == numpy, SAC 루프, numpy actor == torch). 실패하면 여기부터.
-2. **짧은 학습 확인**: `python -m camera.depthfly.train --timesteps 60000 --learning-starts 5000 --n-envs 4 --save-dir runs/df_smoke`
+1. **torch 테스트**: `python -m camera.depthfly.tests` → 12/12 (v3 에서 `test_bc_handoff_torch` 추가, 아직 torch 환경에서 안 돌림).
+2. **모방학습 → SAC (v3)**: 코랩 ⑤-2 → ⑥. 첫 평가(5만)에서 모방학습 수준(5/8) 이 유지되는지, 무너지면 `--actor-freeze-steps`·`--ent-init` 조정.
+   (옛) **짧은 학습 확인**: `python -m camera.depthfly.train --timesteps 60000 --learning-starts 5000 --n-envs 4 --save-dir runs/df_smoke`
    → steps/s 기록, 에피소드 보상·진행률이 오르는지.
 3. **본 학습**: 코랩 `camera/depthfly/colab_train.ipynb` 또는 로컬 `--timesteps 1000000 --resume auto`.
 4. **평가**: `python -m camera.depthfly.evaluate --model runs/.../best_model.zip --maps ifac,roboracer_0817 --obstacles 0` 와 `--obstacles 2`.
    비교 기준: pure pursuit ifac 14.1 s (depthfly env), mapless40 v3 ifac 10.9 s / 팀 맵 9.63 s.
 5. **센서 스트레스 평가 (구현 필요)**: evaluate 에 옵션 추가 — 노이즈 ×2·×3, 구멍 ×2, **섹터 통째 구멍**(은박·검정 덕트 반사 가정),
    pitch ±3°, 높이 ±2 cm, 지연 +30 ms. 어느 조건에서 무너지는지 표로.
-6. **알려진 약점**: 덕트(33 cm)가 3 m 밖에서 16행 중 1~2행. 행을 지평선 근처로 몰기 (`CameraSpec.row_elevations` 를 열의 acute zone 처럼) → 재학습 비교.
+6. **행 재배치 (완료, v2)**. 남은 약점: 시야 91° (헤어핀 안쪽 벽이 시야 밖), 기억 0.1 s.
 7. **시뮬 보강**: 규정의 덕트 사이 틈, 가장자리 가짜 점(flying pixel), 실측 지연.
-8. **카메라 도착 후**: rosbag(depth + camera_info + /scan + IMU + 속도) → 실제 가까움 영상 vs LiDAR 비교 스크립트 → σ·구멍 모델 맞춤.
+8. **ROS2 노드 C++ 포팅**: `camera/depthfly/ros_node.py` → rclcpp (ROS2 코드는 C++ 로, 학습 코드는 Python). 가중치 내보내기 스크립트 필요.
+9. **카메라 도착 후**: rosbag(depth + camera_info + /scan + IMU + 속도) → 실제 가까움 영상 vs LiDAR 비교 스크립트 → σ·구멍 모델 맞춤.
 
 ### mapless40
 - v4 이어 학습 결과 평가, 실차 `MAX_SPEED=2.0` 시험 (`realcar/README.md`).

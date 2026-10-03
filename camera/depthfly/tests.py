@@ -15,8 +15,8 @@ import numpy as np
 from camera.camfly.tests import _wall_grid
 
 from .brain import feature_layout, features_numpy, forward_numpy, init_params, make_dn_wiring, n_inputs
-from .config import CameraSpec, DepthFlyConfig, SceneSpec, state_dim
-from .sensor import NEAR_REF, DepthEyeReal, DepthEyeSim, HoleHold
+from .config import DepthCameraSpec as CameraSpec, DepthFlyConfig, SceneSpec, state_dim
+from .sensor import NEAR_REF, DepthEyeReal, DepthEyeSim, HoleHold, keep_height
 
 
 def _offsets():
@@ -27,19 +27,38 @@ def _offsets():
 
 
 def test_sim_sensor_geometry():
-    """3 m 앞 벽: 벽이 보이는 행만 값, 바닥·5 cm 아래 = 없음, 값 = 0.25 / 수평거리."""
+    """3 m 앞 벽: 벽이 보이는 행만 값, 바닥·높이 기준 아래 = 없음, 값 = 0.25 / 수평거리."""
     cam, sc = CameraSpec(), SceneSpec()
     eye = DepthEyeSim(cam, sc)
     r = eye.ranges(_wall_grid(3.0), 0.0, 0.0, 0.0, np.zeros((0, 3)))
     mid = cam.n_cols // 2
     d = 3.0 - cam.mount_x
     z = cam.height + d * np.tan(cam.row_elevations())
-    exp = (z >= cam.min_obj_height) & (z <= sc.duct_height)
+    exp = keep_height(z, d, cam) & (z <= sc.duct_height)
     got = np.isfinite(r[:, mid])
     assert exp.any() and (exp == got).all(), (exp, r[:, mid])
     assert np.allclose(r[got, mid], d, atol=0.05)
     near = eye.frame(_wall_grid(3.0), 0.0, 0.0, 0.0, np.zeros((0, 3)), np.random.default_rng(0), noise=False)
     assert np.allclose(near[got, mid], NEAR_REF / d, atol=2e-3) and (near[~got, mid] == 0).all()
+
+
+def test_floor_leak_pitch_error():
+    """벽 없는 평평한 바닥: pitch 오차 ±1.5° 까지 가짜 칸 0 (시뮬·실차 둘 다)."""
+    cam, sc = CameraSpec(), SceneSpec()
+    eye = DepthEyeSim(cam, sc)
+    W, H = 640, 400
+    f = (W / 2) / np.tan(np.radians(91.0) / 2)
+    K = np.array([[f, 0, W / 2], [0, f, H / 2], [0, 0, 1.0]])
+    yn = ((np.mgrid[0:H, 0:W][0]) - H / 2) / f
+    for err in (-1.5, -1.0, 0.0, 1.0, 1.5):
+        r = eye.ranges(_wall_grid(14.0), 0.0, 0.0, 0.0, np.zeros((0, 3)), np.radians(err))
+        assert not (r < cam.depth_max).any(), (err, int((r < cam.depth_max).sum()))
+        pt = np.radians(cam.pitch_deg + err)
+        den = yn * np.cos(pt) - np.sin(pt)
+        z = np.where(den > 1e-6, cam.height / np.maximum(den, 1e-6), 0.0)
+        z[z > cam.depth_max] = 0.0
+        near = DepthEyeReal(cam, K, W, H).frame(z.astype(np.float32))
+        assert not (near > 0).any(), (err, int((near > 0).sum()))
 
 
 def test_hole_hold():
@@ -142,6 +161,32 @@ def test_numpy_brain_speed():
     assert ms < 10
 
 
+def test_polarity_audit():
+    """회로 단계별 극성 (polarity.py 의 상황 11개 전부)."""
+    from .polarity import scenarios
+    bad = [(n, e, v) for n, e, v, ok in scenarios() if not ok]
+    assert not bad, bad
+
+
+def test_bc_student_fit_and_roundtrip():
+    """모방학습 학생: 손실이 줄고, 직전 명령 가중치는 0, 저장·불러오기 후 같은 행동."""
+    from .bc import CMD_IDX, Student, W_ACT
+    rng = np.random.default_rng(0)
+    st = Student()
+    X = rng.uniform(0, 0.3, (600, n_inputs())).astype(np.float32)
+    S = rng.uniform(-1, 1, (600, 14)).astype(np.float32)
+    A = np.tanh(np.c_[X[:, :8].sum(1) - X[:, 8:16].sum(1), S[:, 0]]).astype(np.float32)
+    l0 = float((W_ACT * (st.act_from(X, S) - A) ** 2).sum(1).mean())
+    st.fit(X, S, A, epochs=20, log=lambda *_: None)
+    l1 = float((W_ACT * (st.act_from(X, S) - A) ** 2).sum(1).mean())
+    assert l1 < 0.8 * l0, (l0, l1)
+    assert np.all(st.mu_w[:, 48 + CMD_IDX.start:48 + CMD_IDX.stop] == 0)
+    with tempfile.TemporaryDirectory() as d:
+        st.save(f"{d}/b.npz", {"v_max": 8.0})
+        st2 = Student.load(f"{d}/b.npz")
+    assert np.allclose(st.act_from(X[:5], S[:5]), st2.act_from(X[:5], S[:5]))
+
+
 # ------------------------------------------------------------------ torch
 def _torch_ok():
     try:
@@ -190,11 +235,43 @@ def test_sac_loop_and_numpy_actor():
     assert np.allclose(a_t, a_n, atol=1e-4), (a_t, a_n)
 
 
+def test_bc_handoff_torch():
+    """모방학습 npz → SAC 정책: 저장한 zip 의 numpy actor 가 학생과 같은 행동, actor 고정 구간엔 actor 가 안 변함."""
+    import torch
+    from stable_baselines3 import SAC
+    from mapless40.policy import AsymSACPolicy
+    from .bc import Student
+    from .env import DepthFlyEnv
+    from .np_actor import NearNumpyActor
+    from .policy import NearFeatures
+    from .train import ActorFreeze, load_bc_init
+    cf = DepthFlyConfig()
+    env = DepthFlyEnv(maps=("ifac",), cfg=cf, seed=0)
+    st = Student()
+    st.mu_w[:] = np.random.default_rng(1).normal(0, 0.3, st.mu_w.shape).astype(np.float32)
+    st.mu_w[:, 55:59] = 0.0
+    model = SAC(AsymSACPolicy, env, learning_starts=32, batch_size=32, buffer_size=500, device="cpu",
+                ent_coef="auto_0.02",
+                policy_kwargs=dict(features_extractor_class=NearFeatures, net_arch=dict(pi=[], qf=[64, 64])))
+    obs, _ = env.reset(seed=3)
+    with tempfile.TemporaryDirectory() as d:
+        st.save(f"{d}/b.npz", {"v_max": cf.env.action.v_max, "iter": 0})
+        load_bc_init(model, f"{d}/b.npz", cf, -1.6)
+        before = [q.detach().clone() for q in model.policy.actor.parameters()]
+        model.learn(96, callback=ActorFreeze(10 ** 9))
+        after = list(model.policy.actor.parameters())
+        assert all(torch.equal(b_, a_) for b_, a_ in zip(before, after)), "actor 고정 구간에 actor 가 바뀜"
+        model.save(f"{d}/m")
+        na = NearNumpyActor(f"{d}/m.zip")
+    assert np.allclose(na(obs), st(obs), atol=1e-4), (na(obs), st(obs))
+
+
 def main():
-    tests = [test_sim_sensor_geometry, test_hole_hold, test_real_sensor_synthetic_wall, test_brain_selectivity,
-             test_numpy_brain_speed, test_env_obs_and_pp_lap]
+    tests = [test_sim_sensor_geometry, test_floor_leak_pitch_error, test_hole_hold, test_real_sensor_synthetic_wall,
+             test_brain_selectivity, test_numpy_brain_speed, test_env_obs_and_pp_lap, test_polarity_audit,
+             test_bc_student_fit_and_roundtrip]
     if _torch_ok():
-        tests += [test_brain_torch_equals_numpy, test_sac_loop_and_numpy_actor]
+        tests += [test_brain_torch_equals_numpy, test_sac_loop_and_numpy_actor, test_bc_handoff_torch]
     else:
         print("(torch / stable-baselines3 없음 → torch 테스트 건너뜀)")
     failed = 0
