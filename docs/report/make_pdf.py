@@ -1,11 +1,13 @@
-"""REPORT.md → docs/report/REPORT.pdf  (GIF 는 정지 프레임으로).   python docs/report/make_pdf.py"""
+"""md → pdf (GIF 는 정지 프레임으로).   python docs/report/make_pdf.py [REPORT.md docs/report/REPORT.pdf]"""
 import re
+import sys
 from pathlib import Path
 
 import markdown
 
 ROOT = Path(__file__).resolve().parents[2]
-src = (ROOT / "REPORT.md").read_text(encoding="utf-8")
+IN, OUT = (sys.argv[1], sys.argv[2]) if len(sys.argv) > 2 else ("REPORT.md", "docs/report/REPORT.pdf")
+src = (ROOT / IN).read_text(encoding="utf-8")
 
 
 def gif_table(m):
@@ -50,11 +52,11 @@ with sync_playwright() as p:
     b = p.chromium.launch()
     pg = b.new_page()
     pg.goto(tmp.as_uri()); pg.wait_for_load_state("networkidle")
-    pg.pdf(path=str(ROOT / "docs/report/REPORT.pdf"), format="A4", print_background=True,
+    pg.pdf(path=str(ROOT / OUT), format="A4", print_background=True,
            display_header_footer=True, header_template="<span></span>",
            footer_template='<div style="font-size:7pt;color:#888;width:100%;text-align:center;">'
                            '<span class="pageNumber"></span> / <span class="totalPages"></span></div>',
            margin={"top": "16mm", "bottom": "16mm", "left": "14mm", "right": "14mm"})
     b.close()
 tmp.unlink()
-print("docs/report/REPORT.pdf")
+print(OUT)
