@@ -50,10 +50,11 @@ class LapEvalCallback(BaseCallback):
     """
 
     def __init__(self, eval_maps, cfg: EnvConfig, save_dir: Path, eval_freq: int,
-                 n_spawns: int = 3, seed: int = 1234):
+                 n_spawns: int = 3, seed: int = 1234, env_cls=None, env_cfg=None):
+        """env_cls/env_cfg: 다른 센서 환경(camfly 등)으로 평가할 때. cfg 는 차량 EnvConfig (태그용)."""
         super().__init__()
-        self.env = MaplessRaceEnv40(maps=eval_maps, cfg=cfg, seed=seed,
-                                    sensor_noise=True, randomize=False)
+        self.env = (env_cls or MaplessRaceEnv40)(maps=eval_maps, cfg=env_cfg if env_cfg is not None else cfg,
+                                                 seed=seed, sensor_noise=True, randomize=False)
         self.maps = [t.name for t in self.env.tracks]
         self.save_dir, self.eval_freq, self.n_spawns = save_dir, eval_freq, n_spawns
         self.best_file = save_dir / "best.json"
