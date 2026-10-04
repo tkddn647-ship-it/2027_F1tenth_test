@@ -95,7 +95,8 @@ def main():
     p.add_argument("--gradient-steps", type=int, default=2)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--gamma", type=float, default=None, help="기본: 0.1 s 당 0.99 = 0.99^(10/fps)")
-    p.add_argument("--target-entropy", type=float, default=-1.0)
+    p.add_argument("--target-entropy", type=float, default=None,
+                   help="기본: -1 (무작위 시작) / -3.5 (--bc-init: σ≈0.1 정책의 엔트로피 ≈ -3.2 보다 낮게 → 엔트로피 계수가 커지지 않게)")
     p.add_argument("--max-episode-s", type=float, default=60.0)
     p.add_argument("--eval-freq", type=int, default=50_000)
     p.add_argument("--ckpt-freq", type=int, default=100_000)
@@ -107,10 +108,15 @@ def main():
     p.add_argument("--actor-freeze-steps", type=int, default=30_000,
                    help="--bc-init 일 때 처음 이만큼은 critic 만 학습 (엉터리 critic 이 모방한 정책을 망가뜨리는 것 방지)")
     p.add_argument("--ent-init", type=float, default=0.02, help="--bc-init 일 때 엔트로피 계수 시작값 (기본 auto 는 1.0)")
-    p.add_argument("--bc-log-std", type=float, default=-1.6, help="--bc-init 일 때 행동 잡음 log σ 시작값 (σ≈0.2)")
+    p.add_argument("--bc-log-std", type=float, default=-2.3,
+                   help="--bc-init 일 때 행동 잡음 log σ 시작값 (σ≈0.1. σ 0.2 면 모방한 정책이 8초 안에 충돌 — 시뮬 확인)")
     p.add_argument("--wiring", default="bilateral", choices=["bilateral", "random"], help="DN 배선 (v2 까지 random)")
+    p.add_argument("--hard-spawn-p", type=float, default=0.5,
+                   help="이 확률로 라인에서 벗어난 출발 (횡 ±0.4 m, 방향 σ 14°, 2~4.5 m/s). 0 = v3b 까지의 출발")
     add_cfg_args(p)
     args = p.parse_args()
+    if args.target_entropy is None:
+        args.target_entropy = -3.5 if args.bc_init else -1.0
 
     device = args.device
     if device == "auto":
@@ -127,7 +133,7 @@ def main():
                                           encoding="utf-8")
 
     vec_cls = SubprocVecEnv if args.subproc else DummyVecEnv
-    env = make_vec_env(make_env(maps, seed=args.seed, cfg=cf), n_envs=args.n_envs, seed=args.seed,
+    env = make_vec_env(make_env(maps, seed=args.seed, cfg=cf, hard_spawn_p=args.hard_spawn_p), n_envs=args.n_envs, seed=args.seed,
                        vec_env_cls=vec_cls)
     net = lambda s: [int(x) for x in s.split(",") if x.strip()]  # noqa: E731
     policy_kwargs = dict(features_extractor_class=NearFeatures,
