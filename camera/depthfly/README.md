@@ -1,5 +1,7 @@
 # depthfly — depth 카메라 하나 + 초파리 커넥톰만
 
+> **현재 상태·층별 구성·학습 결과 정리: [STATUS.md](STATUS.md)** ([PDF](../../docs/report/STATUS.pdf), 2026-10-04). 아래 본문 중 학습 결과·회로 세부는 STATUS.md 가 최신이다.
+
 **Orbbec Gemini 2L 의 depth 영상만** 쓴다. RGB·LiDAR·CNN·MLP·별도 depth 경로 없음.
 depth 를 파리 눈 격자(16×64)의 **가까움 영상**으로 바꿔 광수용체 자리에 넣고, 합성 커넥톰 시각엽을 지난
 하행 뉴런(DN) 48개를 **선형으로 읽어** 조향·속도를 낸다. 과거 3프레임, 30 Hz.
