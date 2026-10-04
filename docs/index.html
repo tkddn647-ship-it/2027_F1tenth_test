@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>지도 없이 달리는 자율주행</title>
+<meta name="description" content="F1TENTH / Roboracer 2026 — LiDAR 강화학습과 depth 카메라 + 초파리 시각 회로로 지도·위치추정 없이 달리는 자율주행">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f6f5f1; --surface:#ffffff; --ink:#1d1d1b; --ink2:#55554f; --muted:#8a8a82; --line:#e3e1d9;
+  --accent:#d9480f; --accent2:#1c5cab; --tag:#efece4; --code:#f0eee7;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#141413; --surface:#1d1d1b; --ink:#f2f1ec; --ink2:#c3c2b7; --muted:#8f8e86; --line:#2f2f2c;
+    --accent:#ff7a3d; --accent2:#6da7ec; --tag:#272724; --code:#232321;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#141413; --surface:#1d1d1b; --ink:#f2f1ec; --ink2:#c3c2b7; --muted:#8f8e86; --line:#2f2f2c;
+  --accent:#ff7a3d; --accent2:#6da7ec; --tag:#272724; --code:#232321;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Noto Sans KR",system-ui,sans-serif;line-height:1.7;font-size:16px;word-break:keep-all}
+a{color:var(--accent2);text-decoration:none} a:hover{text-decoration:underline}
+.wrap{max-width:1040px;margin:0 auto;padding:0 20px}
+header.top{border-bottom:1px solid var(--line);position:sticky;top:0;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);z-index:5}
+header.top .wrap{display:flex;align-items:center;justify-content:space-between;height:56px;gap:12px}
+.brand{font-weight:700;letter-spacing:-.01em;white-space:nowrap}
+nav a{color:var(--ink2);margin-left:18px;font-size:14px}
+.hero{padding:72px 0 40px}
+.eyebrow{font-family:"JetBrains Mono",monospace;font-size:13px;color:var(--accent);letter-spacing:.04em}
+h1{font-size:clamp(32px,5.4vw,56px);line-height:1.15;margin:12px 0 18px;font-weight:900;letter-spacing:-.03em}
+.lead{font-size:clamp(16px,2.1vw,19px);color:var(--ink2);max-width:720px;margin:0}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}
+.chip{background:var(--tag);color:var(--ink2);border-radius:999px;padding:4px 12px;font-size:13px}
+.compare{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin:40px 0 8px}
+.ccard{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px 20px}
+.ccard .k{font-size:13px;color:var(--muted)}
+.ccard .t{font-weight:700;font-size:18px;margin:2px 0 8px}
+.ccard dl{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0;font-size:14px}
+.ccard dt{color:var(--muted)} .ccard dd{margin:0}
+section.proj{padding:64px 0;border-top:1px solid var(--line)}
+.num{font-family:"JetBrains Mono",monospace;color:var(--accent);font-size:14px}
+h2{font-size:clamp(26px,3.6vw,36px);line-height:1.25;margin:6px 0 12px;letter-spacing:-.02em}
+.sub{color:var(--ink2);max-width:760px;margin:0 0 26px}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:0 0 28px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.stat .v{font-size:clamp(24px,3.4vw,32px);font-weight:900;letter-spacing:-.02em;line-height:1.1}
+.stat .v small{font-size:.5em;font-weight:500;color:var(--ink2);margin-left:2px}
+.stat .l{font-size:13px;color:var(--muted);margin-top:4px}
+.gallery{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.gallery.one{grid-template-columns:1fr}
+figure{margin:0;background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+figure img{width:100%;display:block;background:#fff}
+figcaption{font-size:13px;color:var(--ink2);padding:10px 14px}
+h3{font-size:19px;margin:36px 0 10px;letter-spacing:-.01em}
+pre{background:var(--code);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:1.55;margin:0}
+ul.why{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+ul.why li{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;font-size:14.5px}
+ul.why b{display:block;font-size:15.5px;margin-bottom:2px}
+.issues{display:grid;gap:10px}
+.issue{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:0;background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.issue>div{padding:12px 16px;font-size:14.5px}
+.issue .p{border-right:1px solid var(--line)}
+.issue .lab{display:block;font-size:12px;color:var(--muted);font-family:"JetBrains Mono",monospace;margin-bottom:2px}
+.issue .p .lab{color:var(--accent)}
+.note{font-size:14px;color:var(--ink2);background:var(--tag);border-radius:10px;padding:12px 16px;margin-top:22px}
+footer{border-top:1px solid var(--line);padding:36px 0 60px;color:var(--muted);font-size:14px}
+.stack{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 18px}
+.theme{background:none;border:1px solid var(--line);color:var(--ink2);border-radius:8px;padding:4px 10px;font:inherit;font-size:13px;cursor:pointer}
+@media (max-width:760px){
+  nav{display:none}
+  .compare,.gallery,ul.why{grid-template-columns:1fr}
+  .stats{grid-template-columns:1fr 1fr}
+  .issue{grid-template-columns:1fr} .issue .p{border-right:0;border-bottom:1px solid var(--line)}
+  .hero{padding:44px 0 24px}
+}
+</style>
+</head>
+<body>
+<header class="top"><div class="wrap">
+  <span class="brand">F1TENTH · mapless RL</span>
+  <div><nav><a href="#lidar">01 LiDAR</a><a href="#camera">02 카메라 + 초파리</a><a href="https://github.com/tkddn647-ship-it/2027_F1tenth_test">GitHub</a></nav></div>
+  <button class="theme" id="tbtn" type="button" aria-label="밝기 전환">◐</button>
+</div></header>
+
+<main class="wrap">
+  <section class="hero">
+    <div class="eyebrow">F1TENTH / ROBORACER 2026 · 아주대</div>
+    <h1>지도 없이 달리는<br>강화학습 자율주행</h1>
+    <p class="lead">1/10 크기 레이싱카가 SLAM·위치추정 없이, 센서 입력에서 바로 조향과 속도를 낸다.
+      LiDAR 정책과, depth 카메라 한 대 + 초파리 시각계를 본뜬 회로 정책 두 가지를 만들었다.</p>
+    <div class="chips"><span class="chip">강화학습 SAC</span><span class="chip">asymmetric actor-critic</span><span class="chip">모방학습 DAgger</span><span class="chip">시뮬레이터 직접 구현</span><span class="chip">ROS2 · Jetson</span></div>
+
+    <div class="compare">
+      <div class="ccard"><div class="k">01</div><div class="t">LiDAR 강화학습</div>
+        <dl><dt>센서</dt><dd>LiDAR + IMU + 속도, 40 Hz</dd><dt>정책</dt><dd>1D CNN + MLP</dd><dt>결과</dt><dd>팀 트랙 3바퀴 무사고 9.63 초 (시뮬)</dd></dl></div>
+      <div class="ccard"><div class="k">02</div><div class="t">depth 카메라 + 초파리 커넥톰</div>
+        <dl><dt>센서</dt><dd>depth 카메라 한 대, 30 Hz</dd><dt>정책</dt><dd>초파리 시각 회로 (학습 값 약 760개)</dd><dt>결과</dt><dd>모방학습만으로 ifac 12.8 초 (시뮬, 진행 중)</dd></dl></div>
+    </div>
+  </section>
+
+  <!-- ===================== 01 ===================== -->
+  <section class="proj" id="lidar">
+    <div class="num">01</div>
+    <h2>맵 없이 LiDAR 만으로 달리는 강화학습</h2>
+    <p class="sub">LiDAR·IMU·속도만 보고 40 Hz 로 조향·속도를 낸다. 학습할 때만 critic 이 레이싱라인을 보고(asymmetric actor-critic),
+      실차에 올라가는 actor 는 센서만 본다 — 빠른 라인을 배우지만 실차에는 지도가 필요 없다.</p>
+
+    <div class="stats">
+      <div class="stat"><div class="v">9.63<small>초</small></div><div class="l">팀 트랙 3바퀴 무사고, 출발 4곳 모두 (라인 이론 10.0 초)</div></div>
+      <div class="stat"><div class="v">10.9<small>초</small></div><div class="l">ifac 최고 랩 (pure pursuit 11.5 초, Follow-the-Gap 18.0 초)</div></div>
+      <div class="stat"><div class="v">1.1<small>ms</small></div><div class="l">torch 없이 numpy 추론, 틱당</div></div>
+    </div>
+
+    <div class="gallery">
+      <figure><img src="assets/v3_318k_ifac.gif" alt="LiDAR 정책이 ifac 트랙을 주행하는 시뮬레이션" loading="lazy"><figcaption>ifac — 왼쪽 트랙·궤적(속도 색), 오른쪽 차 주변 10 m LiDAR</figcaption></figure>
+      <figure><img src="assets/v3_318k_team.gif" alt="LiDAR 정책이 팀 트랙을 주행하는 시뮬레이션" loading="lazy"><figcaption>팀 트랙 (직접 매핑한 지도)</figcaption></figure>
+    </div>
+
+    <h3>구조</h3>
+<pre>LiDAR 최근 4스캔 (1125빔, 10 m) ── 1D CNN (프레임마다 같은 가중치) ──┐
+IMU 요레이트 · 속도 · 직전 명령 ────── FC ───────────────────────────┴─▶ MLP ─▶ 조향, 속도 2~5 m/s
+학습할 때만: critic 이 레이싱라인 오차·곡률·목표 속도, 앞 장애물 위치를 추가로 봄</pre>
+    <p class="sub" style="margin-top:14px">시뮬레이터도 직접 만들었다: 단일 트랙 차량 모델(RK4), 서보·구동 지연, 브레이크 없는 타력 감속, 횡가속 한계,
+      LiDAR 레이캐스팅·잡음·누락, IMU·속도 주기, 계산 지연, 랜덤 장애물.</p>
+
+    <h3>부딪힌 문제와 해결</h3>
+    <div class="issues">
+      <div class="issue"><div class="p"><span class="lab">문제</span>학습 5 steps/s — 100만 스텝에 50시간</div><div><span class="lab">해결</span>LiDAR 그림 그리기를 조회표로, 1D CNN 채널·stride 조정 → 연산 1/6, 35 steps/s</div></div>
+      <div class="issue"><div class="p"><span class="lab">문제</span>43만 스텝에 좁은 트랙을 전부 실패</div><div><span class="lab">해결</span>넓은 F1 서킷 위주 학습이 원인 → 맵 가중치(좁은 3 : 넓은 1)와 벽 여유 보상</div></div>
+      <div class="issue"><div class="p"><span class="lab">문제</span>이어 학습 직후 정책 붕괴 (에피소드 837 → 114)</div><div><span class="lab">해결</span>빈 버퍼를 무작위 행동으로 채우던 것 → 불러온 정책으로 채우기</div></div>
+      <div class="issue"><div class="p"><span class="lab">문제</span>코랩이 끊기면 모델 파일이 깨짐</div><div><span class="lab">해결</span>임시 파일 저장 → 검증 → 교체 (원자적 저장), 깨진 파일은 건너뛰고 이어 학습</div></div>
+    </div>
+  </section>
+
+  <!-- ===================== 02 ===================== -->
+  <section class="proj" id="camera">
+    <div class="num">02</div>
+    <h2>depth 카메라 한 대 + 초파리 시각 회로</h2>
+    <p class="sub">LiDAR 없이 depth 카메라(Orbbec Gemini 2L) 한 대가 본 것을, 초파리 시각계를 본뜬 회로에 넣어 바로 조향·속도를 낸다. CNN·MLP 없음.</p>
+
+    <div class="stats">
+      <div class="stat"><div class="v">760<small>개</small></div><div class="l">실제로 쓰이는 학습 값 (LiDAR 정책은 10만 개 이상)</div></div>
+      <div class="stat"><div class="v">12.8<small>초</small></div><div class="l">ifac, 모방학습만으로 (선생님 pure pursuit 14.1 초)</div></div>
+      <div class="stat"><div class="v">5<small>/8</small></div><div class="l">출발 위치 8곳 중 3바퀴 무사고 완주 (장애물 없이)</div></div>
+    </div>
+
+    <div class="gallery one">
+      <figure><img src="assets/circuit_lap_ifac.gif" alt="초파리 회로가 depth 영상만 보고 ifac 트랙을 주행" loading="lazy"><figcaption>회로가 직접 운전 · ifac — 오른쪽: 가까움 영상, 움직임, 시각엽, 하행 뉴런 48개</figcaption></figure>
+      <figure><img src="assets/circuit_lap_team.gif" alt="초파리 회로가 depth 영상만 보고 팀 트랙을 주행" loading="lazy"><figcaption>회로가 직접 운전 · 팀 트랙 11.5 초</figcaption></figure>
+    </div>
+
+    <h3>왜 이렇게</h3>
+    <ul class="why">
+      <li><b>왜 RGB 가 아니라 depth</b>트랙 경계·장애물 색이 정해져 있지 않다. depth 는 거리만 재서 색과 무관하고, 카메라 칩이 계산해 Jetson 부담이 거의 없다.</li>
+      <li><b>하는 일이 같다</b>초파리 시각계는 빠르게 날며 벽·장애물을 피하고 코스를 유지하도록 진화했다. 회전 감지(HS), 다가오는 물체 감지(LPLC2) 회로가 이미 있다.</li>
+      <li><b>작고 빠르다</b>학습 값 약 760개, Jetson CPU 에서 프레임당 수 ms. GPU 가 필요 없다.</li>
+      <li><b>들여다볼 수 있다</b>어느 뉴런이 왜 켜져서 왼쪽으로 꺾었는지 볼 수 있다. 연결 구조는 고정하고 세기만 학습한다.</li>
+    </ul>
+
+    <h3>구조</h3>
+<pre>depth (30 fps) ─▶ 파리 눈 격자 16×64 '가까움' = 0.25 m / 거리   (바닥 제거, 정면·지평선에 칸 집중)   × 최근 3프레임
+  ─▶ lamina  ON/OFF 시간 변화 + 대비 적응
+  ─▶ T4/T5   움직임 방향 검출 (좌·우·상·하)
+  ─▶ HS/VS 흐름 · LPLC2 다가옴 · LC 가장자리 · L3 가까움        = 96
+  ─▶ 하행 뉴런 48  (좌우 20쌍 거울상 + 가운데 8, 같은 쪽 흥분 · 반대쪽 억제)
+  ─▶ 선형 읽기 ─▶ 조향, 속도</pre>
+
+    <h3>과정에서 찾은 문제와 해결</h3>
+    <div class="issues">
+      <div class="issue"><div class="p"><span class="lab">문제</span>처음부터 강화학습 → 10만 스텝에도 첫 코너에서 충돌</div><div><span class="lab">해결</span>회로 극성을 시뮬 장면 11개로 전수 검사. 다가옴 감지가 2 m 밖에서 거꾸로 동작, 하행 뉴런 부호가 랜덤이었던 것 발견 → 가까움 증가율로 다시 계산, 좌우 대칭 배선</div></div>
+      <div class="issue"><div class="p"><span class="lab">문제</span>모방학습 검증 손실은 낮은데 혼자 몰면 바로 충돌</div><div><span class="lab">해결</span>'직전 명령'을 보고 방금 행동을 반복하는 것만 배움 (copycat 문제) → 모방학습 동안 그 입력 차단, DAgger 로 학생이 벗어난 상황도 학습</div></div>
+      <div class="issue"><div class="p"><span class="lab">문제</span>모방학습 → 강화학습으로 넘기자 8초마다 충돌, 엔트로피 계수 폭주</div><div><span class="lab">해결</span>행동 잡음 σ 0.2 에서 같은 정책이 226 스텝 만에 충돌하는 것을 시뮬로 확인 → σ 0.1, 목표 엔트로피 −3.5, 처음 3만 스텝은 critic 만 학습</div></div>
+    </div>
+
+    <p class="note">실제 초파리 연결 데이터가 아니라 알려진 세포 유형·연결 원칙을 따른 합성 회로이고, 결과는 모두 시뮬레이션이다.
+      장애물 회피는 강화학습으로 학습 중이며, 카메라가 오면 실제 덕트를 찍어 시뮬 센서 모델을 보정할 계획이다.</p>
+  </section>
+</main>
+
+<footer><div class="wrap">
+  <div>사용 기술</div>
+  <div class="stack"><span class="chip">Python</span><span class="chip">PyTorch</span><span class="chip">Stable-Baselines3</span><span class="chip">Gymnasium</span><span class="chip">NumPy</span><span class="chip">ROS2</span><span class="chip">Jetson Orin Nano</span><span class="chip">Google Colab</span></div>
+  <div>코드 · 기록: <a href="https://github.com/tkddn647-ship-it/2027_F1tenth_test">github.com/tkddn647-ship-it/2027_F1tenth_test</a></div>
+</div></footer>
+<script>
+(function(){
+  var b=document.getElementById('tbtn'), r=document.documentElement;
+  try{var s=localStorage.getItem('theme'); if(s) r.setAttribute('data-theme',s);}catch(e){}
+  b.addEventListener('click',function(){
+    var dark = r.getAttribute('data-theme') ? r.getAttribute('data-theme')==='dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    var n = dark ? 'light' : 'dark'; r.setAttribute('data-theme', n);
+    try{localStorage.setItem('theme', n);}catch(e){}
+  });
+})();
+</script>
+</body>
+</html>
