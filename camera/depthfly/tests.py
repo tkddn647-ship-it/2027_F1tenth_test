@@ -162,7 +162,7 @@ def test_numpy_brain_speed():
 
 
 def test_polarity_audit():
-    """회로 단계별 극성 (polarity.py 의 상황 11개 전부)."""
+    """회로 단계별 극성 (polarity.py scenarios() 전부, 조향 대리 3개 포함)."""
     from .polarity import scenarios
     bad = [(n, e, v) for n, e, v, ok in scenarios() if not ok]
     assert not bad, bad

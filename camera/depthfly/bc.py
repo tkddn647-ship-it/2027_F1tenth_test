@@ -109,9 +109,10 @@ class Student:
                  mu_w=self.mu_w, mu_b=self.mu_b, meta=json.dumps(meta))
 
 
-def collect(env, expert, student, steps, beta, steer_noise, rng, ep_steps):
+def collect(env, expert, student, steps, beta, steer_noise, rng, ep_steps, opts=None):
+    opts = {"n_obstacles": 0} if opts is None else opts
     X, ST, A = [], [], []
-    obs, _ = env.reset(options={"n_obstacles": 0})
+    obs, _ = env.reset(options=dict(opts))
     k = noise = 0
     crashes = 0
     for _ in range(steps):
@@ -126,7 +127,7 @@ def collect(env, expert, student, steps, beta, steer_noise, rng, ep_steps):
         k += 1
         if te or tr or k >= ep_steps:
             crashes += bool(info.get("collided"))
-            obs, _ = env.reset(options={"n_obstacles": 0})
+            obs, _ = env.reset(options=dict(opts))
             k = noise = 0
     return np.array(X, np.float32), np.array(ST, np.float32), np.array(A, np.float32), crashes
 
@@ -156,13 +157,19 @@ def main():
     p.add_argument("--ep-s", type=float, default=20.0, help="에피소드 길이 (짧게 끊어 출발 위치를 다양하게)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", default="runs/depthfly_bc/bc_init.npz")
+    p.add_argument("--obstacles", action="store_true",
+                   help="장애물 있는 에피소드 (환경 기본 70 %%) + 장애물을 피하는 선생님 (expert.avoid_controller) + 라인 밖 출발 50 %%")
     add_cfg_args(p)
     a = p.parse_args()
 
     cf = DepthFlyConfig(v_max=a.v_max, brake=a.brake)
     maps = [m for m in a.maps.split(",") if m]
-    env = DepthFlyEnv(maps=maps, cfg=cf, seed=a.seed)
-    expert = pp_controller(cf.env)
+    env = DepthFlyEnv(maps=maps, cfg=cf, seed=a.seed, hard_spawn_p=0.5 if a.obstacles else 0.0)
+    if a.obstacles:
+        from .expert import avoid_controller
+        expert, opts = avoid_controller(cf.env), {}
+    else:
+        expert, opts = pp_controller(cf.env), None
     st = Student(seed=a.seed)
     rng = np.random.default_rng(a.seed)
     out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
@@ -171,7 +178,7 @@ def main():
     for it in range(a.iters):
         beta = 1.0 if it == 0 else max(0.0, 0.5 * (1 - it / max(a.iters - 1, 1)))
         t0 = time.time()
-        x, s, y, crashes = collect(env, expert, st, a.steps, beta, a.steer_noise, rng, int(a.ep_s * cf.fps))
+        x, s, y, crashes = collect(env, expert, st, a.steps, beta, a.steer_noise, rng, int(a.ep_s * cf.fps), opts)
         X = x if X is None else np.concatenate([X, x]); ST = s if ST is None else np.concatenate([ST, s])
         A = y if A is None else np.concatenate([A, y])
         print(f"[bc] 반복 {it}  β={beta:.2f}  +{len(x):,} (총 {len(X):,})  충돌 {crashes}회  수집 {time.time() - t0:.0f}s")

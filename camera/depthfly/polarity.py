@@ -6,6 +6,9 @@ depthfly.polarity — 회로 단계별 극성(부호) 검사.   python -m camera
   열 0 = 오른쪽 끝(−45.5°) … 열 63 = 왼쪽 끝(+45.5°).  섹터 0~3 = 오른쪽, 4~7 = 왼쪽.  밴드 0 = 위, 1 = 아래.
   T4/T5 'left'  = 영상이 왼쪽(열 증가)으로 흐름.  HS = left − right  → 영상이 왼쪽으로 흐르면 +.
   VS = down − up → 영상이 아래로 흐르면 +.  LPLC2 = 섹터별 가까움 증가율(다가옴) ≥ 0.
+  조향 대리 = 오른쪽 DN 평균 − 왼쪽 DN 평균.  + = 왼쪽으로 조향
+  (action +1 → 전륜각 +, 저속 자전거 모델에서 +δ → +요레이트 = 왼쪽).
+  같은 쪽이 가까우면 그 쪽 DN 이 커지므로, 왼쪽 벽으로 다가가면 대리는 음수(오른쪽)여야 한다.
 """
 
 from __future__ import annotations
@@ -41,6 +44,11 @@ def _frames(grid, poses, obstacles=None):
         o = obs if obstacles is None or np.ndim(obstacles) == 2 else np.asarray(obstacles[i], float)
         out.append(eye.frame(grid, x, y, yaw, o, np.random.default_rng(0), noise=False))
     return np.stack(out)[None].astype(np.float32)
+
+
+def _steer_proxy(dn) -> float:
+    """오른쪽 DN − 왼쪽 DN.  + 이면 왼쪽으로 조향하는 쪽."""
+    return float(dn[20:40].mean() - dn[:20].mean())
 
 
 def _groups(feat):
@@ -95,6 +103,16 @@ def scenarios():
     x = _frames(g, [(0, 0, 0), (0.12, 0.05, 0.02), (0.24, 0.1, 0.04)], [[2.0, 0.3, 0.2]])
     e = np.abs(forward_numpy(x[..., ::-1].copy(), q, M, S)[0][mirror_dn_index()] - forward_numpy(x, q, M, S)[0]).max()
     R.append(("DN: 좌우 뒤집은 영상", "짝 DN 출력 동일 (오차 0)", e, e < 1e-5))
+    # 6) 조향 부호. 읽기층 가중치는 학습값이라 여기 넣지 않고, 고정된 좌우 DN 차이만 본다.
+    #    대칭 복도에서 한쪽으로 다가갈 때 벽 반대쪽으로 조향해야 한다. 정면 중앙 장애물은 조향 0.
+    gs = corridor(1.2, -1.2, 12.0)
+    sp = _steer_proxy(forward_numpy(_frames(gs, [(0, -0.15, 0.0), (0.05, 0.05, 0.0), (0.10, 0.25, 0.0)]), q, M, S)[0])
+    R.append(("왼쪽 벽으로 접근", "조향 대리 < 0 (오른쪽으로)", sp, sp < 0))
+    sp = _steer_proxy(forward_numpy(_frames(gs, [(0, 0.15, 0.0), (0.05, -0.05, 0.0), (0.10, -0.25, 0.0)]), q, M, S)[0])
+    R.append(("오른쪽 벽으로 접근", "조향 대리 > 0 (왼쪽으로)", sp, sp > 0))
+    sp = _steer_proxy(forward_numpy(
+        _frames(corridor(3.0, -3.0, 12.0), [(0, 0, 0), (0.15, 0, 0), (0.30, 0, 0)], [[2.2, 0.0, 0.2]]), q, M, S)[0])
+    R.append(("정면 장애물: 조향", "조향 대리 ≈ 0 (한쪽으로 안 돎)", abs(sp), abs(sp) < 1e-3))
     return R
 
 
