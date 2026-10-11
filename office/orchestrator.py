@@ -125,6 +125,8 @@ def call(role_name: str, prompt: str, cfg: dict) -> str:
 
 QUESTION_MARKER = "<!-- ai-office:questions -->"
 GO_COMMAND = "/ai-office go"
+FIX_COMMAND = "/ai-office fix"
+FIX_MARKER = "<!-- ai-office:fix-round -->"
 
 
 def gh_repo() -> str:
@@ -145,7 +147,12 @@ def gh_api(path: str, *fields: str, method: str = "GET", check: bool = True):
         return None
 
 
+TRUSTED = {"OWNER", "MEMBER", "COLLABORATOR"}
+
+
 def fetch_comments(number: int) -> list[dict]:
+    """저장소 소유자·협업자와 AI Office 자신의 댓글만 쓴다.
+    공개 저장소에선 아무나 댓글을 달 수 있어서, 남의 댓글로 AI에 지시를 끼워넣는 걸 막기 위함."""
     if not number:
         return []
     try:
@@ -153,9 +160,19 @@ def fetch_comments(number: int) -> list[dict]:
     except RuntimeError as e:
         log(f"  댓글을 못 가져왔습니다 (계속 진행): {e}")
         return []
-    return [{"human": (c.get("user") or {}).get("type") != "Bot" and QUESTION_MARKER not in (c.get("body") or ""),
-             "author": (c.get("user") or {}).get("login", "?"),
-             "body": c.get("body") or ""} for c in data]
+    out, skipped = [], 0
+    for c in data:
+        body = c.get("body") or ""
+        is_bot = (c.get("user") or {}).get("type") == "Bot"
+        trusted = c.get("author_association") in TRUSTED
+        if not (is_bot or trusted):
+            skipped += 1
+            continue
+        out.append({"human": trusted and not is_bot and QUESTION_MARKER not in body and FIX_MARKER not in body,
+                    "author": (c.get("user") or {}).get("login", "?"), "body": body})
+    if skipped:
+        log(f"  권한 없는 사용자의 댓글 {skipped}개는 무시합니다")
+    return out
 
 
 def format_comments(comments: list[dict]) -> str:
@@ -235,11 +252,37 @@ def build(plan_data: dict, cfg: dict, commit: bool) -> list[dict]:
     return reports
 
 
+SKIP_DIRS = {".git", "node_modules", "venv", ".venv", "__pycache__", ".ai-office-logs"}
+
+
+def discover_tests(cfg: dict) -> list[str]:
+    """__init__.py가 있는 패키지 안의 tests.py → `python -m 패키지.tests`. 새로 만든 패키지도 자동으로 검사된다."""
+    if not cfg.get("test_discover"):
+        return []
+    exclude = {e.strip("/") for e in cfg.get("test_exclude") or []}
+    found = []
+    for root, dirs, files in os.walk(REPO_ROOT):
+        rel = Path(root).relative_to(REPO_ROOT)
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and (rel / d).as_posix() not in exclude)
+        if "tests.py" in files and "__init__.py" in files and rel.parts:
+            if all(part.isidentifier() for part in rel.parts):
+                found.append(f"python -m {'.'.join(rel.parts)}.tests")
+    return found
+
+
+def test_command_list(cfg: dict) -> list[str]:
+    cmds = list(cfg.get("test_commands") or [])
+    for c in discover_tests(cfg):
+        if c not in cmds:
+            cmds.append(c)
+    return cmds
+
+
 def run_tests(cfg: dict) -> list[dict]:
     """Builder와 별개로 오케스트레이터가 직접 테스트를 돌린다 (Builder 보고를 그대로 믿지 않기 위해)."""
     results = []
     timeout = cfg.get("test_timeout_sec", 600)
-    for cmd in cfg.get("test_commands") or []:
+    for cmd in test_command_list(cfg):
         log(f"테스트: {cmd}")
         t0 = time.time()
         try:
@@ -257,7 +300,7 @@ def run_tests(cfg: dict) -> list[dict]:
 
 def format_tests(tests: list[dict], detail: bool = True) -> str:
     if not tests:
-        return "(설정된 테스트 없음 — config.yaml의 test_commands)"
+        return "(실행한 테스트 없음 — config.yaml의 test_commands / test_discover)"
     lines = ["| 명령 | 결과 | 시간 |", "|---|---|---|"]
     for t in tests:
         result = "✅ 통과" if t["ok"] else "❌ 실패 (exit %s)" % t["code"]
@@ -277,6 +320,7 @@ def format_reports(reports: list[dict]) -> str:
 
 
 def review(issue: dict, plan_data: dict, base: str, reports: list[dict], tests: list[dict], cfg: dict) -> str:
+    """base: diff 기준 (브랜치 이름 또는 origin/브랜치)."""
     diff = sh(["git", "diff", f"{base}...HEAD", "--", ".", ":!.ai-office-logs"], check=False).stdout
     if not diff.strip():  # 커밋 안 하는 로컬 모드: 새 파일도 diff에 보이게 intent-to-add
         sh(["git", "add", "-A", "-N"], check=False)
@@ -388,9 +432,115 @@ def create_pr(issue: dict, branch: str, base: str, body: str, needs_human: bool)
     if pr is None:
         pr = gh_api("pulls", *fields, method="POST")
     if needs_human:
-        ensure_label("needs-human", "d93f0b", "AI Office: 사람 확인 필요")
-        gh_api(f"issues/{pr['number']}/labels", "labels[]=needs-human", method="POST", check=False)
+        set_needs_human(pr["number"], True)
     return pr.get("html_url", "")
+
+
+# ---------- 수정 라운드 (/ai-office fix) ----------
+
+def extract_section(md: str, heading: str) -> str:
+    """'### heading'부터 다음 '### '나 '---' 구분선 전까지."""
+    m = re.search(rf"^###[^\n]*{re.escape(heading)}[^\n]*\n(.*?)(?=^### |^---\s*$|\Z)", md, re.S | re.M)
+    return m.group(1).strip() if m else ""
+
+
+def set_needs_human(number: int, needs_human: bool) -> None:
+    if needs_human:
+        ensure_label("needs-human", "d93f0b", "AI Office: 사람 확인 필요")
+        gh_api(f"issues/{number}/labels", "labels[]=needs-human", method="POST", check=False)
+    else:
+        gh_api(f"issues/{number}/labels/needs-human", method="DELETE", check=False)
+
+
+def run_fix(pr_number: int, cfg: dict, push: bool) -> int:
+    pr = gh_api(f"pulls/{pr_number}")
+    if pr["head"]["repo"]["full_name"] != pr["base"]["repo"]["full_name"]:
+        gh_api(f"issues/{pr_number}/comments", "body=AI Office: 포크에서 온 PR은 고치지 않습니다.", method="POST", check=False)
+        return 1
+    head, base = pr["head"]["ref"], pr["base"]["ref"]
+    comments = fetch_comments(pr_number)
+    max_rounds = int(cfg.get("max_fix_rounds", 2))
+    done_rounds = sum(1 for c in comments if FIX_MARKER in c["body"])
+    log(f"PR #{pr_number} 수정 라운드 {done_rounds + 1}/{max_rounds} ({head} → {base})")
+    if done_rounds >= max_rounds:
+        if push:
+            gh_api(f"issues/{pr_number}/comments", f"body={FIX_MARKER}\nAI Office: 수정 라운드를 이미 {max_rounds}번 했습니다 "
+                   f"(`max_fix_rounds`). 더 고치려면 사람이 직접 고치거나, 새 이슈로 범위를 좁혀 주세요.", method="POST", check=False)
+        log("최대 라운드에 도달해 멈춥니다.")
+        return 0
+
+    # 사람의 지시: 가장 최근 '/ai-office fix' 댓글에서 명령 뒤 텍스트
+    req = next((c["body"].split(FIX_COMMAND, 1)[1].strip() for c in reversed(comments)
+                if c["human"] and FIX_COMMAND in c["body"]), "")
+    human_request = req or "(추가 지시 없음 — 아래 리뷰 지적을 고칠 것)"
+    # 가장 최근 리뷰/테스트: 마지막 수정 라운드 댓글, 없으면 PR 본문
+    last_round = next((c["body"] for c in reversed(comments) if FIX_MARKER in c["body"]), "")
+    src = last_round or (pr.get("body") or "")
+    latest_review = extract_section(src, "자동 리뷰") or "(리뷰 없음)"
+    latest_tests = extract_section(src, "CI 테스트") or "(기록 없음)"
+    m = re.search(r"(?:Closes |이슈 )#(\d+)", pr.get("body") or "")
+    issue = {"number": int(m.group(1)), "title": "", "body": ""} if m else {"number": 0, "title": pr["title"], "body": ""}
+    if m:
+        i = gh_api(f"issues/{issue['number']}", check=False) or {}
+        issue.update(title=i.get("title", ""), body=i.get("body") or "")
+
+    sh(["git", "fetch", "origin", f"{head}:refs/remotes/origin/{head}", f"{base}:refs/remotes/origin/{base}"], check=False)
+    sh(["git", "checkout", "-B", head, f"origin/{head}"])
+    if sh(["git", "status", "--porcelain"]).stdout.strip():
+        sys.exit("커밋 안 된 변경이 있습니다. 먼저 커밋하거나 `git stash` 하세요.")
+    if push:
+        sh(["git", "config", "user.name", "ai-office[bot]"], check=False)
+        sh(["git", "config", "user.email", "ai-office@users.noreply.github.com"], check=False)
+
+    tpl = (OFFICE_DIR / "roles/fixer.md").read_text(encoding="utf-8")
+    prompt = fill(tpl, project_notes=notes(cfg), issue_number=issue["number"], issue_title=issue["title"],
+                  issue_body=issue["body"] or "(없음)", human_request=human_request,
+                  latest_review=latest_review[:6000], latest_tests=latest_tests[:3000])
+    task = {"id": f"fix{done_rounds + 1}", "title": f"수정 라운드 {done_rounds + 1}"}
+    try:
+        report, ok = call("builder", prompt, cfg), True
+    except RuntimeError as e:
+        report, ok = str(e), False
+    changed = bool(sh(["git", "status", "--porcelain"]).stdout.strip())
+    if push and changed:
+        sh(["git", "add", "-A"])
+        sh(["git", "commit", "-m", f"ai-office: 수정 라운드 {done_rounds + 1} (PR #{pr_number})"])
+    reports = [{"task": task, "ok": ok, "changed": changed, "report": report}]
+
+    tests = run_tests(cfg)
+    plan_data = {"mode": "PR 수정 라운드 — 아래 '이전 리뷰' 지적과 사람 지시를 고쳤는지 확인할 것",
+                 "human_request": human_request, "previous_review": latest_review[:4000]}
+    review_md = review(issue, plan_data, f"origin/{base}", reports, tests, cfg)
+    verdict = parse_verdict(review_md)
+    needs_human, banner = status_banner(verdict, reports, tests)
+    if not changed:
+        needs_human = True
+    log(f"판정: {verdict} · 변경: {changed} · 사람 확인 필요: {needs_human}")
+
+    mark = "✅" if ok and changed else ("⚠️ 변경 없음" if ok else "❌ 실패")
+    body = "\n".join([
+        FIX_MARKER, f"## 🔧 수정 라운드 {done_rounds + 1}/{max_rounds}", "", banner, "",
+        f"**지시:** {human_request}", "",
+        f"{mark} <details><summary>Builder 보고</summary>\n\n{report[:3000]}\n\n</details>", "",
+        "### CI 테스트 (오케스트레이터가 직접 실행)", format_tests(tests), "",
+        "### 자동 리뷰 (PR 전체 diff 기준)", re.sub(r"^VERDICT:.*\n?", "", review_md, count=1), "",
+        "---",
+        ("_더 고치려면 다시 `/ai-office fix` (지시를 뒤에 덧붙일 수 있음). "
+         "Draft PR이면 확인 후 **Ready for review**를 누르세요._"),
+    ])
+    save_log("fix_comment.md", body)
+    if not push:
+        log(f"로컬 모드 종료. 결과: {LOG_DIR}/fix_comment.md")
+        return 0
+    if changed:
+        sh(["git", "push", "origin", f"HEAD:{head}"])
+    gh_api(f"issues/{pr_number}/comments", f"body={body[:60000]}", method="POST")
+    set_needs_human(pr_number, needs_human)
+    title = re.sub(r"^\[AI Office[^\]]*\]\s*", "", pr["title"])
+    gh_api(f"pulls/{pr_number}", f"title={'[AI Office · 확인 필요] ' if needs_human else '[AI Office] '}{title}",
+           method="PATCH", check=False)
+    log("수정 라운드 결과를 PR에 남겼습니다.")
+    return 0
 
 
 # ---------- 메인 ----------
@@ -424,9 +574,13 @@ def main() -> int:
     ap.add_argument("--plan-only", action="store_true", help="기획만 하고 종료")
     ap.add_argument("--no-push", action="store_true", help="커밋/푸시/PR 없이 로컬에서만 실행")
     ap.add_argument("--force", action="store_true", help="Planner 질문이 있어도 진행")
+    ap.add_argument("--fix-pr", type=int, help="PR 수정 라운드 (/ai-office fix)")
     args = ap.parse_args()
 
     cfg = yaml.safe_load((OFFICE_DIR / "config.yaml").read_text(encoding="utf-8"))
+    fix_pr = args.fix_pr or int(os.environ.get("AI_OFFICE_FIX_PR") or 0)
+    if fix_pr:
+        return run_fix(fix_pr, cfg, push=not args.no_push)
     issue = load_issue(args)
     log(f"이슈 #{issue['number']}: {issue['title']} (댓글 {len(issue['comments'])}개)")
 

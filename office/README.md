@@ -8,7 +8,7 @@
   → Planner  (Claude, 읽기 전용)  이슈·댓글 읽고 최대 3개 작업으로 나눔
        └ 막히는 질문이 있으면 → 이슈에 질문 댓글 + 라벨 자동 제거 → 멈춤 (작업 안 함)
   → Builder  (Cursor)             작업마다 구현
-  → CI 테스트 (오케스트레이터가 직접 실행)  mapless40 / camfly / depthfly tests
+  → CI 테스트 (오케스트레이터가 직접 실행)  tests.py가 있는 패키지를 자동으로 찾아 전부 실행
   → Reviewer (Claude, 읽기 전용)  diff + Builder 보고 + CI 결과로 판정
   → PR → feat/mapless40-asym-sac
        ├ APPROVE + 테스트 통과 → 일반 PR
@@ -24,6 +24,25 @@
    - Read and write permissions
    - Allow GitHub Actions to create and approve pull requests 체크
 3. 워크플로는 **기본 브랜치(main)에 있는 것**만 이슈에 반응합니다. AI Office 변경은 main에 머지돼야 적용됩니다.
+
+## 진행 상황 알림
+
+- 라벨을 붙이면 1분 안에 이슈에 **"🏃 작업을 시작합니다 + 진행 상황 링크"** 댓글이 달립니다. 이 댓글이 안 달리면 실행이 안 된 것입니다 (라벨 이름, main에 워크플로가 있는지 확인).
+- 실행이 실패하면 **"❌ 실패 + 로그 링크"** 댓글이 달립니다.
+
+## PR 고치기: `/ai-office fix`
+
+PR이 "확인 필요"로 왔거나 고칠 점이 있으면, **새 이슈를 만들지 말고 그 PR에 댓글**을 다세요.
+
+```
+/ai-office fix
+/ai-office fix reset마다 트랙 만들지 말고 random이 뽑혔을 때만 만들어줘
+```
+
+- 명령 뒤에 지시를 덧붙이면 리뷰 지적보다 **사람 지시를 우선**합니다. 비워 두면 직전 리뷰 지적을 고칩니다.
+- 같은 PR 브랜치에 커밋 → CI 테스트 → PR 전체 diff 재리뷰 → 결과를 PR 댓글로 남깁니다. 통과하면 `needs-human` 라벨과 제목의 "확인 필요"가 자동으로 빠집니다.
+- PR 하나당 최대 2번 (`max_fix_rounds`). 그 이상은 범위를 좁힌 새 이슈로.
+- 저장소 소유자·협업자의 댓글만 실행됩니다.
 
 ## AI가 질문을 올렸을 때
 
@@ -53,8 +72,10 @@ AI는 이슈 본문과 댓글만 보고 일합니다. 대상 폴더, 원하는 �
 
 ## 규칙과 한계
 
-- 프로젝트 규칙은 `office/config.yaml`의 `project_notes`, CI 테스트 목록은 `test_commands`에 있습니다.
+- 프로젝트 규칙은 `office/config.yaml`의 `project_notes`에 있습니다.
+- CI 테스트는 `__init__.py`가 있는 패키지 안의 `tests.py`를 자동으로 찾습니다 (`test_discover`). 새 패키지를 만들면 `tests.py`(실패 시 exit 1)를 같이 두세요. 실차 폴더는 `test_exclude`로 제외됩니다.
+- AI에게 전달되는 댓글은 **저장소 소유자·협업자의 것만**입니다. 공개 저장소라 외부인이 댓글로 AI에 지시를 끼워넣는 것을 막기 위함입니다.
 - CI에는 GPU·ROS·실차가 없습니다. **학습 결과와 실차 동작은 검증되지 않습니다.** 테스트 통과는 "코드가 깨지지 않았다"는 뜻이지 "더 잘 달린다"는 뜻이 아닙니다.
 - 작업 브랜치가 main이 아니라서 PR이 머지돼도 **이슈는 자동으로 닫히지 않습니다.** 직접 닫아 주세요.
-- 한도: 실행 1번 = Claude 2회 + Cursor 최대 3회. 질문으로 멈추면 Claude 1회만 씁니다. 내 Pro/Cursor 구독 한도에서 빠집니다.
+- 한도: 실행 1번 = Claude 2회 + Cursor 최대 3회. 질문으로 멈추면 Claude 1회, 수정 라운드 1번 = Cursor 1회 + Claude 1회. 내 Pro/Cursor 구독 한도에서 빠집니다.
 - 라벨은 저장소 쓰기 권한이 있는 사람만 붙일 수 있습니다. 팀원에게 쓰기 권한이 있으면 그 사람이 붙여도 **내 구독 한도**가 쓰입니다.
