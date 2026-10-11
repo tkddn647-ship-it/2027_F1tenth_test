@@ -121,6 +121,65 @@ def call(role_name: str, prompt: str, cfg: dict) -> str:
     return result
 
 
+# ---------- GitHub (REST만 사용: gh api) ----------
+
+QUESTION_MARKER = "<!-- ai-office:questions -->"
+GO_COMMAND = "/ai-office go"
+
+
+def gh_repo() -> str:
+    # Actions에선 GITHUB_REPOSITORY, 로컬에선 gh가 git remote로 {owner}/{repo}를 채운다
+    return os.environ.get("GITHUB_REPOSITORY") or "{owner}/{repo}"
+
+
+def gh_api(path: str, *fields: str, method: str = "GET", check: bool = True):
+    cmd = ["gh", "api", "-X", method, f"repos/{gh_repo()}" + (f"/{path}" if path else "")]
+    for f in fields:
+        cmd += ["-F" if f.split("=", 1)[1] in ("true", "false") else "-f", f]
+    p = sh(cmd, check=False)
+    if check and p.returncode != 0:
+        raise RuntimeError(f"gh api {method} {path} 실패: {(p.stderr or p.stdout)[-800:]}")
+    try:
+        return json.loads(p.stdout) if p.stdout.strip() else None
+    except json.JSONDecodeError:
+        return None
+
+
+def fetch_comments(number: int) -> list[dict]:
+    if not number:
+        return []
+    try:
+        data = gh_api(f"issues/{number}/comments?per_page=100") or []
+    except RuntimeError as e:
+        log(f"  댓글을 못 가져왔습니다 (계속 진행): {e}")
+        return []
+    return [{"human": (c.get("user") or {}).get("type") != "Bot" and QUESTION_MARKER not in (c.get("body") or ""),
+             "author": (c.get("user") or {}).get("login", "?"),
+             "body": c.get("body") or ""} for c in data]
+
+
+def format_comments(comments: list[dict]) -> str:
+    if not comments:
+        return "(댓글 없음)"
+    out = []
+    for c in comments[-20:]:
+        who = f"사람({c['author']})" if c["human"] else "AI Office"
+        out.append(f"[{who}]\n{c['body'][:2000]}")
+    return "\n\n".join(out)
+
+
+def question_state(comments: list[dict]) -> tuple[bool, bool]:
+    """(이전에 질문을 올렸는가, 그 뒤에 사람이 답했는가 또는 /ai-office go)"""
+    asked_idx = max((i for i, c in enumerate(comments) if QUESTION_MARKER in c["body"]), default=-1)
+    force = any(c["human"] and GO_COMMAND in c["body"] for c in comments)
+    answered = asked_idx >= 0 and any(c["human"] for c in comments[asked_idx + 1:])
+    return asked_idx >= 0, answered or force
+
+
+def ensure_label(name: str, color: str, desc: str) -> None:
+    gh_api("labels", f"name={name}", f"color={color}", f"description={desc}", method="POST", check=False)
+
+
 # ---------- 단계 ----------
 
 def notes(cfg: dict) -> str:
@@ -140,12 +199,15 @@ def extract_json(text: str) -> dict:
 def plan(issue: dict, cfg: dict) -> dict:
     tpl = (OFFICE_DIR / "roles/planner.md").read_text(encoding="utf-8")
     prompt = fill(tpl, project_notes=notes(cfg), max_tasks=cfg["max_tasks"], issue_number=issue["number"],
-                  issue_title=issue["title"], issue_body=issue["body"] or "(본문 없음)")
+                  issue_title=issue["title"], issue_body=issue["body"] or "(본문 없음)",
+                  issue_comments=format_comments(issue.get("comments", [])))
     result = extract_json(call("planner", prompt, cfg))
-    tasks = result.get("tasks") or []
-    if len(tasks) > cfg["max_tasks"]:
-        log(f"  작업이 {len(tasks)}개라 {cfg['max_tasks']}개로 자릅니다")
-        result["tasks"] = tasks[: cfg["max_tasks"]]
+    result.setdefault("tasks", [])
+    result.setdefault("questions", [])
+    result.setdefault("notes", [])
+    if len(result["tasks"]) > cfg["max_tasks"]:
+        log(f"  작업이 {len(result['tasks'])}개라 {cfg['max_tasks']}개로 자릅니다")
+        result["tasks"] = result["tasks"][: cfg["max_tasks"]]
     save_log("plan.json", json.dumps(result, ensure_ascii=False, indent=2))
     return result
 
@@ -167,61 +229,191 @@ def build(plan_data: dict, cfg: dict, commit: bool) -> list[dict]:
             log(f"  작업 {t.get('id')} 실패: {e}")
         changed = bool(sh(["git", "status", "--porcelain"]).stdout.strip())
         if commit and changed:
-            sh(["git", "add", "-A"])  # 로그 폴더는 .gitignore로 제외됨
+            sh(["git", "add", "-A"])
             sh(["git", "commit", "-m", f"ai-office: task {t.get('id')} - {t.get('title', '')}"])
         reports.append({"task": t, "ok": ok, "changed": changed, "report": report})
     return reports
 
 
-def review(issue: dict, plan_data: dict, base: str, cfg: dict) -> str:
+def run_tests(cfg: dict) -> list[dict]:
+    """Builder와 별개로 오케스트레이터가 직접 테스트를 돌린다 (Builder 보고를 그대로 믿지 않기 위해)."""
+    results = []
+    timeout = cfg.get("test_timeout_sec", 600)
+    for cmd in cfg.get("test_commands") or []:
+        log(f"테스트: {cmd}")
+        t0 = time.time()
+        try:
+            p = subprocess.run(cmd, shell=True, cwd=REPO_ROOT, text=True, capture_output=True, timeout=timeout)
+            code, out = p.returncode, (p.stdout + p.stderr)
+        except subprocess.TimeoutExpired:
+            code, out = -1, f"{timeout}초 시간 초과"
+        r = {"cmd": cmd, "ok": code == 0, "code": code, "secs": round(time.time() - t0, 1),
+             "tail": "\n".join(out.strip().splitlines()[-15:])}
+        log(f"  {'통과' if r['ok'] else '실패'} (exit {code}, {r['secs']}s)")
+        results.append(r)
+    save_log("tests.json", json.dumps(results, ensure_ascii=False, indent=2))
+    return results
+
+
+def format_tests(tests: list[dict], detail: bool = True) -> str:
+    if not tests:
+        return "(설정된 테스트 없음 — config.yaml의 test_commands)"
+    lines = ["| 명령 | 결과 | 시간 |", "|---|---|---|"]
+    for t in tests:
+        result = "✅ 통과" if t["ok"] else "❌ 실패 (exit %s)" % t["code"]
+        lines.append(f"| `{t['cmd']}` | {result} | {t['secs']}s |")
+    if detail:
+        for t in tests:
+            lines.append(f"\n<details><summary>{t['cmd']} 출력 (끝 15줄)</summary>\n\n```\n{t['tail']}\n```\n</details>")
+    return "\n".join(lines)
+
+
+def format_reports(reports: list[dict]) -> str:
+    out = []
+    for r in reports:
+        state = "실패" if not r["ok"] else ("변경 있음" if r["changed"] else "변경 없음")
+        out.append(f"[작업 {r['task'].get('id')}: {r['task'].get('title', '')} — {state}]\n{r['report'][:2500]}")
+    return "\n\n".join(out) or "(없음)"
+
+
+def review(issue: dict, plan_data: dict, base: str, reports: list[dict], tests: list[dict], cfg: dict) -> str:
     diff = sh(["git", "diff", f"{base}...HEAD", "--", ".", ":!.ai-office-logs"], check=False).stdout
     if not diff.strip():  # 커밋 안 하는 로컬 모드: 새 파일도 diff에 보이게 intent-to-add
         sh(["git", "add", "-A", "-N"], check=False)
         diff = sh(["git", "diff", "--", ".", ":!.ai-office-logs"], check=False).stdout
     if not diff.strip():
-        return "## 판정\n변경 사항이 없어 리뷰를 건너뜁니다."
+        return "VERDICT: REQUEST_CHANGES\n## 판정 이유\n변경 사항이 없습니다."
     limit = cfg["max_diff_chars"]
     note = f" (앞 {limit}자만 표시, 전체 {len(diff)}자)" if len(diff) > limit else ""
     tpl = (OFFICE_DIR / "roles/reviewer.md").read_text(encoding="utf-8")
     prompt = fill(tpl, project_notes=notes(cfg), issue_number=issue["number"], issue_title=issue["title"],
                   issue_body=issue["body"] or "", plan_json=json.dumps(plan_data, ensure_ascii=False, indent=2),
+                  builder_reports=format_reports(reports), test_results=format_tests(tests),
                   truncated_note=note, diff=diff[:limit])
     try:
         return call("reviewer", prompt, cfg)
     except RuntimeError as e:
-        return f"## 판정\n리뷰 실패 — 사람이 직접 확인하세요.\n\n```\n{e}\n```"
+        return f"VERDICT: REQUEST_CHANGES\n## 판정 이유\n리뷰 실패 — 사람이 직접 확인하세요.\n\n```\n{e}\n```"
 
 
-def pr_body(issue: dict, plan_data: dict, reports: list[dict], review_md: str) -> str:
-    lines = [f"Closes #{issue['number']}" if issue["number"] else "", "",
-             f"**요약:** {plan_data.get('summary', '')}", "", "### 작업 결과"]
+def parse_verdict(review_md: str) -> str:
+    m = re.search(r"VERDICT:\s*(APPROVE|REQUEST_CHANGES)", review_md)
+    if m:
+        return m.group(1)
+    head = review_md[:400]  # 형식을 안 지켰을 때 대비
+    if "REQUEST_CHANGES" in head:
+        return "REQUEST_CHANGES"
+    if "APPROVE" in head:
+        return "APPROVE"
+    return "UNKNOWN"
+
+
+def status_banner(verdict: str, reports: list[dict], tests: list[dict]) -> tuple[bool, str]:
+    problems = []
+    if verdict == "REQUEST_CHANGES":
+        problems.append("리뷰어가 **수정 요청**")
+    elif verdict == "UNKNOWN":
+        problems.append("리뷰 판정을 **읽지 못함**")
+    failed_tests = [t for t in tests if not t["ok"]]
+    if failed_tests:
+        problems.append(f"CI 테스트 **{len(failed_tests)}/{len(tests)}개 실패**")
+    failed_tasks = [r for r in reports if not r["ok"]]
+    if failed_tasks:
+        problems.append(f"작업 **{len(failed_tasks)}/{len(reports)}개 실패**")
+    if problems:
+        return True, ("> [!WARNING]\n> **사람 확인 필요:** " + " · ".join(problems) +
+                      "\n> 아래 리뷰와 테스트 결과를 보고 판단하세요. 이대로 머지해도 되지만, 그건 사람의 결정입니다.")
+    tests_note = f"CI 테스트 {len(tests)}개 통과" if tests else "CI 테스트 미설정"
+    return False, f"> [!NOTE]\n> 리뷰 **APPROVE** · {tests_note}. 그래도 머지 전에 diff는 한 번 보세요."
+
+
+def pr_body(issue: dict, plan_data: dict, reports: list[dict], tests: list[dict],
+            review_md: str, banner: str, base: str) -> str:
+    n = issue["number"]
+    lines = [banner, ""]
+    if n:
+        lines.append(f"Closes #{n}" if base == default_branch() else
+                     f"이슈 #{n} (작업 브랜치 `{base}`로 머지돼도 이슈는 자동으로 닫히지 않으니 직접 닫아 주세요)")
+    lines += ["", f"**요약:** {plan_data.get('summary', '')}", "", "### 작업 결과"]
     for r in reports:
         mark = "✅" if r["ok"] and r["changed"] else ("⚠️ 변경 없음" if r["ok"] else "❌ 실패")
         lines.append(f"- {mark} **{r['task'].get('id')}. {r['task'].get('title', '')}**")
         lines.append("  <details><summary>Builder 보고</summary>\n\n" + r["report"][:3000] + "\n\n  </details>")
+    lines += ["", "### CI 테스트 (오케스트레이터가 직접 실행)", format_tests(tests)]
     if plan_data.get("questions"):
-        lines += ["", "### Planner가 남긴 질문"] + [f"- {q}" for q in plan_data["questions"]]
-    lines += ["", "### 자동 리뷰", review_md, "", "---",
+        lines += ["", "### 남은 질문"] + [f"- {q}" for q in plan_data["questions"]]
+    if plan_data.get("notes"):
+        lines += ["", "### Planner 참고 의견"] + [f"- {q}" for q in plan_data["notes"]]
+    lines += ["", "### 자동 리뷰", re.sub(r"^VERDICT:.*\n?", "", review_md, count=1), "", "---",
               "_AI Office가 만든 PR입니다. 자동 머지되지 않으니 직접 확인 후 머지하세요._"]
     return "\n".join(lines)
+
+
+_default_branch_cache: str | None = None
+
+
+def default_branch() -> str:
+    global _default_branch_cache
+    if _default_branch_cache is None:
+        try:
+            _default_branch_cache = (gh_api("") or {}).get("default_branch") or "main"
+        except RuntimeError:
+            _default_branch_cache = "main"
+    return _default_branch_cache
+
+
+def ask_questions(issue: dict, plan_data: dict) -> None:
+    n = issue["number"]
+    qs = "\n".join(f"{i}. {q}" for i, q in enumerate(plan_data["questions"], 1))
+    notes_md = ("\n\n**참고 의견**\n" + "\n".join(f"- {x}" for x in plan_data["notes"])) if plan_data.get("notes") else ""
+    body = (f"{QUESTION_MARKER}\n### 🤔 AI Office: 작업 전에 확인이 필요합니다\n\n"
+            f"**이해한 내용:** {plan_data.get('summary', '')}\n\n"
+            f"추측으로 진행하면 결과가 틀어질 수 있어서 멈췄습니다. 이 이슈에 댓글로 답해 주세요.\n\n{qs}{notes_md}\n\n"
+            f"---\n**이어서 진행하려면:** 답 댓글을 단 뒤 `ai-office` 라벨을 다시 붙이세요 (방금 자동으로 뗐습니다).\n"
+            f"질문을 무시하고 그냥 진행하려면 댓글에 `{GO_COMMAND}` 라고 쓰고 라벨을 붙이세요.")
+    gh_api(f"issues/{n}/comments", f"body={body}", method="POST")
+    gh_api(f"issues/{n}/labels/ai-office", method="DELETE", check=False)
+    log(f"질문 {len(plan_data['questions'])}개를 이슈 #{n}에 올리고 멈춥니다.")
+
+
+def create_pr(issue: dict, branch: str, base: str, body: str, needs_human: bool) -> str:
+    title = ("[AI Office · 확인 필요] " if needs_human else "[AI Office] ") + issue["title"]
+    fields = [f"title={title}", f"head={branch}", f"base={base}", f"body={body[:60000]}"]
+    pr = None
+    if needs_human:  # 초안(Draft)으로: 실수로 머지 버튼 누르는 것 방지
+        try:
+            pr = gh_api("pulls", *fields, "draft=true", method="POST")
+        except RuntimeError as e:  # 무료 요금제 비공개 레포 등 Draft 미지원
+            log(f"  Draft PR을 못 만들어 일반 PR로 만듭니다: {str(e)[:200]}")
+    if pr is None:
+        pr = gh_api("pulls", *fields, method="POST")
+    if needs_human:
+        ensure_label("needs-human", "d93f0b", "AI Office: 사람 확인 필요")
+        gh_api(f"issues/{pr['number']}/labels", "labels[]=needs-human", method="POST", check=False)
+    return pr.get("html_url", "")
 
 
 # ---------- 메인 ----------
 
 def load_issue(args) -> dict:
+    issue = None
     if args.issue_title:
-        return {"number": args.issue_number or 0, "title": args.issue_title, "body": args.issue_body or ""}
-    event_path = os.environ.get("GITHUB_EVENT_PATH")
-    if event_path and Path(event_path).exists():
-        ev = json.loads(Path(event_path).read_text(encoding="utf-8"))
-        if "issue" in ev:
-            i = ev["issue"]
-            return {"number": i["number"], "title": i["title"], "body": i.get("body") or ""}
-    num = args.issue_number or os.environ.get("ISSUE_NUMBER")
-    if num:  # workflow_dispatch: gh로 이슈 가져오기
-        i = json.loads(sh(["gh", "issue", "view", str(num), "--json", "number,title,body"]).stdout)
-        return {"number": i["number"], "title": i["title"], "body": i.get("body") or ""}
-    sys.exit("이슈 정보가 없습니다. --issue-title 또는 --issue-number를 주세요.")
+        issue = {"number": args.issue_number or 0, "title": args.issue_title, "body": args.issue_body or ""}
+    else:
+        event_path = os.environ.get("GITHUB_EVENT_PATH")
+        if event_path and Path(event_path).exists():
+            ev = json.loads(Path(event_path).read_text(encoding="utf-8"))
+            if "issue" in ev:
+                i = ev["issue"]
+                issue = {"number": i["number"], "title": i["title"], "body": i.get("body") or ""}
+        num = args.issue_number or os.environ.get("ISSUE_NUMBER")
+        if issue is None and num:  # workflow_dispatch
+            i = gh_api(f"issues/{num}")
+            issue = {"number": i["number"], "title": i["title"], "body": i.get("body") or ""}
+    if issue is None:
+        sys.exit("이슈 정보가 없습니다. --issue-title 또는 --issue-number를 주세요.")
+    issue["comments"] = fetch_comments(issue["number"]) if not args.issue_title else []
+    return issue
 
 
 def main() -> int:
@@ -231,11 +423,12 @@ def main() -> int:
     ap.add_argument("--issue-body")
     ap.add_argument("--plan-only", action="store_true", help="기획만 하고 종료")
     ap.add_argument("--no-push", action="store_true", help="커밋/푸시/PR 없이 로컬에서만 실행")
+    ap.add_argument("--force", action="store_true", help="Planner 질문이 있어도 진행")
     args = ap.parse_args()
 
     cfg = yaml.safe_load((OFFICE_DIR / "config.yaml").read_text(encoding="utf-8"))
     issue = load_issue(args)
-    log(f"이슈 #{issue['number']}: {issue['title']}")
+    log(f"이슈 #{issue['number']}: {issue['title']} (댓글 {len(issue['comments'])}개)")
 
     base_branch = cfg.get("base_branch")
     if base_branch:
@@ -250,15 +443,26 @@ def main() -> int:
                  "먼저 커밋하거나 `git stash` 한 뒤 다시 실행하세요.")
 
     plan_data = plan(issue, cfg)
-    log(f"계획: {len(plan_data['tasks'])}개 작업 · 질문 {len(plan_data.get('questions', []))}개")
+    log(f"계획: 작업 {len(plan_data['tasks'])}개 · 막는 질문 {len(plan_data['questions'])}개 · 참고 {len(plan_data['notes'])}개")
     if args.plan_only:
         print(json.dumps(plan_data, ensure_ascii=False, indent=2))
         return 0
-    if not plan_data["tasks"]:
-        log("작업이 없습니다. Planner 질문을 확인하세요.")
-        return 0
 
     push = not args.no_push
+    asked_before, answered = question_state(issue["comments"])
+    proceed_anyway = args.force or answered
+    if plan_data["questions"] and not proceed_anyway:
+        if push and issue["number"]:
+            ask_questions(issue, plan_data)
+        else:
+            log("막는 질문이 있어 멈춥니다 (--force로 무시 가능):\n  - " + "\n  - ".join(plan_data["questions"]))
+        return 0
+    if plan_data["questions"]:
+        log("질문이 남았지만 사람이 답했거나 강제 진행이라 계속합니다.")
+    if not plan_data["tasks"]:
+        log("작업이 없습니다.")
+        return 0
+
     base = sh(["git", "rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
     branch = f"ai-office/issue-{issue['number']}-{int(time.time())}"
     if push:
@@ -267,8 +471,13 @@ def main() -> int:
         sh(["git", "checkout", "-b", branch])
 
     reports = build(plan_data, cfg, commit=push)
-    review_md = review(issue, plan_data, base, cfg)
-    body = pr_body(issue, plan_data, reports, review_md)
+    tests = run_tests(cfg)
+    review_md = review(issue, plan_data, base, reports, tests, cfg)
+    verdict = parse_verdict(review_md)
+    needs_human, banner = status_banner(verdict, reports, tests)
+    log(f"판정: {verdict} · 사람 확인 필요: {needs_human}")
+    body = pr_body(issue, plan_data, reports, tests, review_md, banner, base) if push else \
+        pr_body_local(issue, plan_data, reports, tests, review_md, banner, base)
     save_log("pr_body.md", body)
 
     if not push:
@@ -277,15 +486,21 @@ def main() -> int:
     if not any(r["changed"] for r in reports):
         log("변경된 파일이 없어 PR을 만들지 않습니다.")
         if issue["number"]:
-            sh(["gh", "issue", "comment", str(issue["number"]), "--body",
-                "AI Office: 변경 사항 없이 끝났습니다.\n\n" + body[:60000]], check=False)
+            gh_api(f"issues/{issue['number']}/comments",
+                   f"body=AI Office: 변경 사항 없이 끝났습니다.\n\n{body[:60000]}", method="POST", check=False)
         return 1
 
     sh(["git", "push", "-u", "origin", branch])
-    pr = sh(["gh", "pr", "create", "--base", base, "--head", branch,
-             "--title", f"[AI Office] {issue['title']}", "--body", body[:60000]])
-    log(f"PR 생성: {pr.stdout.strip()}")
+    url = create_pr(issue, branch, base, body, needs_human)
+    log(f"PR 생성: {url}")
     return 0
+
+
+def pr_body_local(*a) -> str:
+    # 로컬 모드에선 GitHub 조회(default_branch) 없이 만든다
+    global _default_branch_cache
+    _default_branch_cache = _default_branch_cache or "main"
+    return pr_body(*a)
 
 
 if __name__ == "__main__":

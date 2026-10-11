@@ -7,6 +7,15 @@ base_branch: feat/mapless40-asym-sac
 max_tasks: 3
 max_diff_chars: 60000
 
+# Builder가 끝난 뒤 오케스트레이터가 직접 돌리는 테스트 (CLAUDE.md §2, §7 "커밋 전 tests")
+# Builder 보고와 별개의 객관적 확인. 결과는 PR과 리뷰어에게 전달됩니다.
+test_commands:
+  - python -m mapless40.tests
+  - python -m camera.camfly.tests
+  - python -m camera.depthfly.tests   # 극성 검사(polarity scenarios) 포함
+# camera.depthfly.polarity 단독 실행은 넣지 않음: 실패해도 exit 0이라 CI에서 항상 "통과"로 보임
+test_timeout_sec: 900
+
 project_notes: |
   - 작업 전에 레포 루트의 CLAUDE.md를 먼저 읽고 그 규칙을 따른다.
   - 실차 코드는 이슈가 그 폴더를 명시적으로 지목할 때만 수정한다:
