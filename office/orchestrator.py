@@ -100,14 +100,17 @@ def _run_engine(cmd: list[str], role: dict, engine: str) -> str:
             f"{engine} 실패 (exit {p.returncode}, subtype={data.get('subtype')}):\n"
             f"{data.get('result') or p.stderr[-2000:]}"
         )
-    # 사용량 기록 (Cursor는 0으로 나올 수 있음)
+    # 사용량 기록 (Cursor CLI는 토큰 수를 안 줄 수 있음 → "-"로 표시)
     usage = data.get("usage") or {}
-    cost = data.get("total_cost_usd")
-    log(f"  {engine} 완료 · usage={usage} · cost={cost}")
+    _last_meta.clear()
+    _last_meta.update(usage=usage, cost=data.get("total_cost_usd"), turns=data.get("num_turns"))
+    log(f"  {engine} 완료 · usage={usage} · cost={data.get('total_cost_usd')}")
     return data.get("result", "")
 
 
 ENGINES = {"claude": run_claude, "cursor": run_cursor}
+_last_meta: dict = {}
+USAGE: list[dict] = []   # 이번 실행의 호출별 사용량 → PR에 표로
 
 
 def call(role_name: str, prompt: str, cfg: dict) -> str:
@@ -116,9 +119,40 @@ def call(role_name: str, prompt: str, cfg: dict) -> str:
     if engine not in ENGINES:
         raise ValueError(f"{role_name}.engine '{engine}'은 지원하지 않습니다 (claude|cursor)")
     log(f"{role_name} → {engine} 호출")
-    result = ENGINES[engine](prompt, role)
+    _last_meta.clear()
+    t0, ok = time.time(), False
+    try:
+        result = ENGINES[engine](prompt, role)
+        ok = True
+    finally:
+        USAGE.append({"role": role_name, "engine": engine, "ok": ok, "secs": round(time.time() - t0),
+                      "usage": dict(_last_meta.get("usage") or {}), "cost": _last_meta.get("cost"),
+                      "turns": _last_meta.get("turns")})
     save_log(f"{role_name}.out.md", result)
     return result
+
+
+def _n(v) -> str:
+    return f"{v:,}" if isinstance(v, (int, float)) and v else "-"
+
+
+def format_usage() -> str:
+    """호출별 사용량 표. 구독 사용 시 cost는 API로 환산한 참고값일 수 있다 (실제 청구 아님)."""
+    if not USAGE:
+        return "(호출 없음)"
+    lines = ["| 역할 | 엔진 | 입력 토큰 | 캐시 읽기 | 출력 토큰 | 턴 | 시간 |", "|---|---|---|---|---|---|---|"]
+    tot = {"claude": 0, "cursor": 0}
+    for u in USAGE:
+        us = u["usage"]
+        tot[u["engine"]] = tot.get(u["engine"], 0) + 1
+        lines.append(f"| {u['role']}{'' if u['ok'] else ' ❌'} | {u['engine']} | {_n(us.get('input_tokens'))} | "
+                     f"{_n(us.get('cache_read_input_tokens'))} | {_n(us.get('output_tokens'))} | {_n(u['turns'])} | {u['secs']}s |")
+    costs = [u["cost"] for u in USAGE if isinstance(u["cost"], (int, float))]
+    lines.append(f"\n호출 수: Claude {tot.get('claude', 0)}회 · Cursor {tot.get('cursor', 0)}회"
+                 + (f" · API 환산 참고값 ${sum(costs):.3f} (구독은 이 금액이 청구되지 않음)" if costs else ""))
+    lines.append("토큰이 `-`인 칸은 해당 CLI가 사용량을 알려주지 않은 것입니다.")
+    save_log("usage.json", json.dumps(USAGE, ensure_ascii=False, indent=2))
+    return "\n".join(lines)
 
 
 # ---------- GitHub (REST만 사용: gh api) ----------
@@ -388,7 +422,9 @@ def pr_body(issue: dict, plan_data: dict, reports: list[dict], tests: list[dict]
         lines += ["", "### 남은 질문"] + [f"- {q}" for q in plan_data["questions"]]
     if plan_data.get("notes"):
         lines += ["", "### Planner 참고 의견"] + [f"- {q}" for q in plan_data["notes"]]
-    lines += ["", "### 자동 리뷰", re.sub(r"^VERDICT:.*\n?", "", review_md, count=1), "", "---",
+    lines += ["", "### 자동 리뷰", re.sub(r"^VERDICT:.*\n?", "", review_md, count=1), "",
+              "### 사용량", "<details><summary>이번 실행 사용량 (펼치기)</summary>\n\n" + format_usage() + "\n\n</details>",
+              "", "---",
               "_AI Office가 만든 PR입니다. 자동 머지되지 않으니 직접 확인 후 머지하세요._"]
     return "\n".join(lines)
 
@@ -452,16 +488,50 @@ def set_needs_human(number: int, needs_human: bool) -> None:
         gh_api(f"issues/{number}/labels/needs-human", method="DELETE", check=False)
 
 
-def run_fix(pr_number: int, cfg: dict, push: bool) -> int:
+def resolve_fix_target(number: int, push: bool) -> int | None:
+    """댓글이 달린 곳이 이슈면, 그 이슈로 만들어진 가장 최근 AI Office PR을 찾는다."""
+    item = gh_api(f"issues/{number}")
+    if "pull_request" in item:
+        return number
+    prs = gh_api("pulls?state=all&per_page=100&sort=created&direction=desc", check=False) or []
+    mine = [x for x in prs if x["head"]["ref"].startswith(f"ai-office/issue-{number}-")]
+    if not mine:
+        if push:
+            gh_api(f"issues/{number}/comments", "body=AI Office: 이 이슈로 만들어진 AI Office PR을 찾지 못했습니다. "
+                   "`/ai-office fix`는 고칠 **PR**에 댓글로 달아 주세요. 새 작업이면 이 이슈에 `ai-office` 라벨을 붙이세요.",
+                   method="POST", check=False)
+        log(f"이슈 #{number}에 연결된 AI Office PR이 없습니다.")
+        return None
+    target = max(mine, key=lambda x: x["number"])["number"]
+    log(f"이슈 #{number}의 댓글 → 이 이슈의 PR #{target}을 대상으로 진행")
+    if push:
+        gh_api(f"issues/{number}/comments", f"body=AI Office: 이 이슈의 PR #{target}을 대상으로 수정 라운드를 진행합니다. "
+               f"결과는 PR #{target}(또는 후속 PR)에 남깁니다.", method="POST", check=False)
+    return target
+
+
+def run_fix(number: int, cfg: dict, push: bool) -> int:
+    pr_number = resolve_fix_target(number, push)
+    if pr_number is None:
+        return 0
     pr = gh_api(f"pulls/{pr_number}")
     if pr["head"]["repo"]["full_name"] != pr["base"]["repo"]["full_name"]:
         gh_api(f"issues/{pr_number}/comments", "body=AI Office: 포크에서 온 PR은 고치지 않습니다.", method="POST", check=False)
         return 1
     head, base = pr["head"]["ref"], pr["base"]["ref"]
+    # 머지된 PR → 작업 브랜치에서 새 브랜치를 따서 후속 PR로. 머지 안 하고 닫힌 PR → 거부.
+    followup = pr.get("state") == "closed" and bool(pr.get("merged"))
+    if pr.get("state") == "closed" and not followup:
+        if push:
+            gh_api(f"issues/{pr_number}/comments", "body=AI Office: 머지하지 않고 닫힌 PR이라 고치지 않습니다. "
+                   "다시 열거나 새 이슈로 요청해 주세요.", method="POST", check=False)
+        log("닫힌(머지 안 된) PR이라 멈춥니다.")
+        return 0
     comments = fetch_comments(pr_number)
     max_rounds = int(cfg.get("max_fix_rounds", 2))
     done_rounds = sum(1 for c in comments if FIX_MARKER in c["body"])
-    log(f"PR #{pr_number} 수정 라운드 {done_rounds + 1}/{max_rounds} ({head} → {base})")
+    log(f"PR #{pr_number} 수정 라운드 {done_rounds + 1}/{max_rounds} ({head} → {base})"
+        + (" · 이미 머지됨 → 후속 PR" if followup else ""))
     if done_rounds >= max_rounds:
         if push:
             gh_api(f"issues/{pr_number}/comments", f"body={FIX_MARKER}\nAI Office: 수정 라운드를 이미 {max_rounds}번 했습니다 "
@@ -469,12 +539,17 @@ def run_fix(pr_number: int, cfg: dict, push: bool) -> int:
         log("최대 라운드에 도달해 멈춥니다.")
         return 0
 
-    # 사람의 지시: 가장 최근 '/ai-office fix' 댓글에서 명령 뒤 텍스트
-    req = next((c["body"].split(FIX_COMMAND, 1)[1].strip() for c in reversed(comments)
-                if c["human"] and FIX_COMMAND in c["body"]), "")
+    # 사람의 지시: 이번 실행을 일으킨 댓글이 우선 (이슈에 단 댓글이어도 전달됨), 없으면 PR의 최근 fix 댓글
+    trigger = os.environ.get("AI_OFFICE_FIX_REQUEST") or ""
+    if FIX_COMMAND in trigger:
+        req = trigger.split(FIX_COMMAND, 1)[1].strip()
+    else:
+        req = next((c["body"].split(FIX_COMMAND, 1)[1].strip() for c in reversed(comments)
+                    if c["human"] and FIX_COMMAND in c["body"]), "")
     human_request = req or "(추가 지시 없음 — 아래 리뷰 지적을 고칠 것)"
-    # 가장 최근 리뷰/테스트: 마지막 수정 라운드 댓글, 없으면 PR 본문
-    last_round = next((c["body"] for c in reversed(comments) if FIX_MARKER in c["body"]), "")
+    # 가장 최근 리뷰/테스트: 리뷰가 담긴 마지막 수정 라운드 댓글, 없으면 PR 본문
+    last_round = next((c["body"] for c in reversed(comments)
+                       if FIX_MARKER in c["body"] and extract_section(c["body"], "자동 리뷰")), "")
     src = last_round or (pr.get("body") or "")
     latest_review = extract_section(src, "자동 리뷰") or "(리뷰 없음)"
     latest_tests = extract_section(src, "CI 테스트") or "(기록 없음)"
@@ -485,7 +560,12 @@ def run_fix(pr_number: int, cfg: dict, push: bool) -> int:
         issue.update(title=i.get("title", ""), body=i.get("body") or "")
 
     sh(["git", "fetch", "origin", f"{head}:refs/remotes/origin/{head}", f"{base}:refs/remotes/origin/{base}"], check=False)
-    sh(["git", "checkout", "-B", head, f"origin/{head}"])
+    if followup:
+        work_branch = f"ai-office/fix-pr{pr_number}-{int(time.time())}"
+        sh(["git", "checkout", "-B", work_branch, f"origin/{base}"])
+    else:
+        work_branch = head
+        sh(["git", "checkout", "-B", head, f"origin/{head}"])
     if sh(["git", "status", "--porcelain"]).stdout.strip():
         sys.exit("커밋 안 된 변경이 있습니다. 먼저 커밋하거나 `git stash` 하세요.")
     if push:
@@ -524,6 +604,7 @@ def run_fix(pr_number: int, cfg: dict, push: bool) -> int:
         f"{mark} <details><summary>Builder 보고</summary>\n\n{report[:3000]}\n\n</details>", "",
         "### CI 테스트 (오케스트레이터가 직접 실행)", format_tests(tests), "",
         "### 자동 리뷰 (PR 전체 diff 기준)", re.sub(r"^VERDICT:.*\n?", "", review_md, count=1), "",
+        "### 사용량", "<details><summary>이번 라운드 사용량 (펼치기)</summary>\n\n" + format_usage() + "\n\n</details>", "",
         "---",
         ("_더 고치려면 다시 `/ai-office fix` (지시를 뒤에 덧붙일 수 있음). "
          "Draft PR이면 확인 후 **Ready for review**를 누르세요._"),
@@ -531,6 +612,20 @@ def run_fix(pr_number: int, cfg: dict, push: bool) -> int:
     save_log("fix_comment.md", body)
     if not push:
         log(f"로컬 모드 종료. 결과: {LOG_DIR}/fix_comment.md")
+        return 0
+    if followup:
+        if not changed:
+            gh_api(f"issues/{pr_number}/comments", f"body={body[:60000]}", method="POST")
+            log("변경이 없어 후속 PR을 만들지 않았습니다.")
+            return 0
+        sh(["git", "push", "-u", "origin", work_branch])
+        title = re.sub(r"^\[AI Office[^\]]*\]\s*", "", pr["title"])
+        fu_body = (f"PR #{pr_number}(이미 머지됨)에 단 `/ai-office fix`의 **후속 수정**입니다. "
+                   f"`{base}`의 최신 상태에서 이번 수정만 담았습니다.\n\n" + body)
+        url = create_pr({"number": 0, "title": f"후속 수정 #{pr_number}: {title}"}, work_branch, base, fu_body, needs_human)
+        gh_api(f"issues/{pr_number}/comments", f"body={FIX_MARKER}\nAI Office: 이 PR은 이미 머지돼서 수정을 **후속 PR**로 올렸습니다: {url}",
+               method="POST", check=False)
+        log(f"후속 PR 생성: {url}")
         return 0
     if changed:
         sh(["git", "push", "origin", f"HEAD:{head}"])
@@ -578,7 +673,7 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = yaml.safe_load((OFFICE_DIR / "config.yaml").read_text(encoding="utf-8"))
-    fix_pr = args.fix_pr or int(os.environ.get("AI_OFFICE_FIX_PR") or 0)
+    fix_pr = args.fix_pr or int(os.environ.get("AI_OFFICE_FIX_PR") or 0)  # 이슈 번호여도 됨 (PR을 찾아감)
     if fix_pr:
         return run_fix(fix_pr, cfg, push=not args.no_push)
     issue = load_issue(args)

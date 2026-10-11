@@ -4,7 +4,7 @@ on:
   # 이슈에 "ai-office" 라벨을 붙이면 실행
   issues:
     types: [labeled]
-  # PR에 "/ai-office fix" 댓글 → 같은 브랜치에서 리뷰 지적 수정
+  # PR(또는 그 PR을 만든 이슈)에 "/ai-office fix" 댓글 → 리뷰 지적 수정
   issue_comment:
     types: [created]
   # Actions 탭에서 수동 실행
@@ -32,7 +32,7 @@ jobs:
     # 수정 라운드는 저장소 소유자·협업자의 댓글만 받는다 (공개 저장소에서 남이 실행시키는 것 방지)
     if: >-
       (github.event_name == 'issues' && github.event.label.name == 'ai-office') ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+      (github.event_name == 'issue_comment' &&
        startsWith(github.event.comment.body, '/ai-office fix') &&
        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
       github.event_name == 'workflow_dispatch'
@@ -44,6 +44,8 @@ jobs:
       TARGET_NUMBER: ${{ github.event.issue.number || inputs.pr_number || inputs.issue_number }}
       AI_OFFICE_FIX_PR: ${{ (github.event_name == 'issue_comment' && github.event.issue.number) || inputs.pr_number || '' }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      # 이번 실행을 일으킨 댓글 본문 (명령 뒤 지시). 셸에 직접 넣지 않고 환경변수로만 전달
+      AI_OFFICE_FIX_REQUEST: ${{ github.event.comment.body }}
     steps:
       # 설치에 몇 분 걸리니, 받았다는 걸 먼저 알린다
       - name: Announce start
