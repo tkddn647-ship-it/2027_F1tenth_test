@@ -9,12 +9,19 @@ max_diff_chars: 60000
 
 # Builder가 끝난 뒤 오케스트레이터가 직접 돌리는 테스트 (CLAUDE.md §2, §7 "커밋 전 tests")
 # Builder 보고와 별개의 객관적 확인. 결과는 PR과 리뷰어에게 전달됩니다.
-test_commands:
-  - python -m mapless40.tests
-  - python -m camera.camfly.tests
-  - python -m camera.depthfly.tests   # 극성 검사(polarity scenarios) 포함
-# camera.depthfly.polarity 단독 실행은 넣지 않음: 실패해도 exit 0이라 CI에서 항상 "통과"로 보임
+# test_discover: __init__.py가 있는 패키지의 tests.py를 자동으로 찾아 `python -m 패키지.tests` 실행.
+#   → 지금은 mapless40, camera.camfly, camera.depthfly(극성 검사 포함), lidarfly. 새 패키지도 자동 포함.
+#   (camera.depthfly.polarity 단독 실행은 실패해도 exit 0이라 넣지 않음)
+test_discover: true
+test_exclude:            # 탐색에서 뺄 폴더 (실차 ROS 테스트는 CI에서 못 돌림)
+  - Roboracer-2026-main
+  - realcar
+  - sim_ros2
+test_commands: []        # 자동 탐색 외에 추가로 돌릴 명령이 있으면 여기에
 test_timeout_sec: 900
+
+# PR에 "/ai-office fix" 댓글로 돌리는 수정 라운드 최대 횟수 (PR 하나당)
+max_fix_rounds: 2
 
 project_notes: |
   - 작업 전에 레포 루트의 CLAUDE.md를 먼저 읽고 그 규칙을 따른다.
@@ -23,7 +30,8 @@ project_notes: |
     실차 코드는 이 CI에서 실행·검증할 수 없으므로, 수정했다면 "실차 미검증"이라고 반드시 적는다.
   - 레포 루트의 레거시 파일(train_sac_*.py, f1tenth_mapless_env.py, connectome_*.py, watch_*.py 등)은 새 작업에 쓰지 않는다.
   - 모든 명령은 레포 루트에서 `python -m 패키지.모듈` 형태로 실행한다.
-  - 테스트: python -m mapless40.tests / python -m camera.camfly.tests / python -m camera.depthfly.tests
+  - 테스트: 바꾼 패키지의 `python -m 패키지.tests` (예: mapless40, camera.camfly, camera.depthfly, lidarfly).
+    새 패키지를 만들면 그 안에 tests.py(실패 시 exit 1)를 함께 만든다 — CI가 자동으로 찾아 돌린다.
     관련 테스트를 돌려 결과(통과 수)를 보고에 적는다.
   - 학습(train)은 실행하지 않는다. CI에는 GPU가 없고 시간이 오래 걸린다. 학습이 필요한 작업이면 코드만 바꾸고 "학습 필요"라고 적는다.
   - 학습 결과물(*.zip, 모델 파일)·맵·로그 데이터는 수정하거나 지우지 않는다.
