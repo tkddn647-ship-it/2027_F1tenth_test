@@ -25,7 +25,7 @@ from .config import (
     COLLISION, FOV_DEG, HIST, N_BEAMS, OVER_MULT, SERVO_TAU_S, STEER_MAX_RAD, V_MAX, V_MIN,
     W_ALAT, W_EY, W_PROGRESS, W_V_TRACK, W_WALL, lidarfly_config, state_dim,
 )
-from .env import LidarFlyEnv, parse_maps
+from .env import LidarFlyEnv, make_env, parse_maps
 from .randmap import make_random_track
 
 
@@ -106,6 +106,76 @@ def test_env_three_maps_obs_shape():
         assert info2["map"] == name
         # 최신 스캔이 마지막 프레임. 첫 step 뒤에는 스택이 한 칸 밀린다.
         assert obs2["scan"].shape[0] == 3
+
+
+def _line_xy(env) -> np.ndarray:
+    return np.stack([env.track.line.x, env.track.line.y], axis=1).copy()
+
+
+def _same_line(a: np.ndarray, b: np.ndarray) -> bool:
+    return a.shape == b.shape and np.allclose(a, b)
+
+
+def _random_opt() -> dict:
+    return {"map": "random", "s0": 1.0, "lat": 0.0, "dyaw": 0.0, "v0": 2.0, "n_obstacles": 0}
+
+
+def test_random_track_changes_each_reset_and_by_seed():
+    """에피소드마다 random 형상이 바뀌고, 시드가 같으면 첫 트랙이 재현된다."""
+    opt = _random_opt()
+    env = LidarFlyEnv(maps="random", seed=0, sensor_noise=False, randomize=False)
+    assert env.action_space.shape == (2,)
+    env.reset(seed=0, options=opt)
+    g0 = _line_xy(env)
+    assert env.track.name == "random"
+    env.reset(seed=0, options=opt)
+    g1 = _line_xy(env)
+    env.reset(options=opt)
+    g2 = _line_xy(env)
+    assert not _same_line(g0, g1)
+    assert not _same_line(g1, g2)
+    assert env.track.name == "random"
+
+    again = LidarFlyEnv(maps="random", seed=0, sensor_noise=False, randomize=False)
+    again.reset(seed=0, options=opt)
+    assert _same_line(g0, _line_xy(again))
+
+    other = LidarFlyEnv(maps="random", seed=1, sensor_noise=False, randomize=False)
+    other.reset(seed=1, options=opt)
+    assert not _same_line(g0, _line_xy(other))
+    assert other.track.name == "random"
+
+    e0 = make_env("random", seed=10, rank=0, sensor_noise=False, randomize=False)()
+    e1 = make_env("random", seed=10, rank=1, sensor_noise=False, randomize=False)()
+    e0.reset(seed=10, options=opt)
+    e1.reset(seed=11, options=opt)
+    assert not _same_line(_line_xy(e0), _line_xy(e1))
+
+    fixed = LidarFlyEnv(maps="ifac", seed=0, sensor_noise=False, randomize=False)
+    fopt = {"map": "ifac", "s0": 1.0, "lat": 0.0, "dyaw": 0.0, "v0": 2.0, "n_obstacles": 0}
+    fixed.reset(seed=0, options=fopt)
+    fx = fixed.track.line.x.copy()
+    fixed.reset(options=fopt)
+    assert fixed.track.name == "ifac" and np.array_equal(fx, fixed.track.line.x)
+
+
+def test_random_rebuild_keeps_previous_on_failure():
+    env = LidarFlyEnv(maps="random", seed=0, sensor_noise=False, randomize=False)
+    prev = env.tracks[0]
+    import lidarfly.env as envmod
+    real = envmod.make_random_track
+
+    def boom(cfg, rng, name="random"):
+        raise RuntimeError("self-intersection")
+
+    envmod.make_random_track = boom
+    try:
+        obs, info = env.reset(options=_random_opt())
+    finally:
+        envmod.make_random_track = real
+    assert env.tracks[0] is prev and env.track is prev
+    assert info["map"] == "random"
+    assert obs["scan"].shape == (3, 1080)
 
 
 def test_reward_weights_arbitrary_init():
@@ -305,6 +375,8 @@ def main():
         test_lidarfly_config_sources,
         test_parse_weights,
         test_random_track_raceline,
+        test_random_track_changes_each_reset_and_by_seed,
+        test_random_rebuild_keeps_previous_on_failure,
         test_env_three_maps_obs_shape,
         test_reward_weights_arbitrary_init,
         test_pool_near_and_numpy_forward,

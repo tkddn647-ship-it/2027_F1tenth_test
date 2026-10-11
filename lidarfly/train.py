@@ -25,7 +25,7 @@ from pathlib import Path
 import torch
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback
-from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from mapless40.config import GAMMA_40HZ
@@ -113,8 +113,19 @@ def main():
                                           encoding="utf-8")
 
     vec_cls = SubprocVecEnv if args.subproc else DummyVecEnv
-    env = make_vec_env(make_env(maps, seed=args.seed, cfg=cfg), n_envs=args.n_envs, seed=args.seed,
-                       vec_env_cls=vec_cls)
+
+    def _train_env(rank: int):
+        factory = make_env(maps, seed=args.seed, cfg=cfg, rank=rank)
+
+        def _init():
+            env_i = factory()
+            env_i.action_space.seed(args.seed + rank)
+            return Monitor(env_i)
+
+        return _init
+
+    env = vec_cls([_train_env(i) for i in range(args.n_envs)])
+    env.seed(args.seed)
     kw = policy_kwargs(args, cfg)
 
     tb_log = str(save_dir / "tb") if _has_tb() else None

@@ -7,7 +7,8 @@ MaplessRaceEnv40 차량·보상·레이싱라인. 관측만 LiDAR 1080빔 × 3�
   state (14,)     float32  — v̄×3, ω̄×3, ω_latest, (δ,v)×2, Δt×3
   priv  (27,)     float32  — critic 전용. actor 에 넣지 않는다
 
-맵 문자열 "ifac:3,roboracer_0817:3,random:2" 의 random 은 randmap 폐곡선.
+맵 문자열 "ifac:3,roboracer_0817:3,random:2" 의 random 은 자리표시자.
+reset 때 env 시드로 randmap 폐곡선을 다시 만든다.
 """
 
 from __future__ import annotations
@@ -23,6 +24,9 @@ from mapless40.obs_builder import preprocess_scan
 
 from .config import DEFAULT_MAPS, HIST, lidarfly_config, state_dim
 from .randmap import make_random_track
+
+# 폐곡선 자기교차 등으로 생성이 실패하면 이 횟수만큼 다시 뽑고, 그래도 실패하면 이전 트랙을 유지한다.
+_RANDOM_TRIES = 8
 
 
 def parse_maps(maps) -> tuple[list[str], list[float]]:
@@ -100,7 +104,10 @@ class LidarFlyEnv(MaplessRaceEnv40):
         names, weights = parse_maps(maps)
         own_tracks = tracks is None
         if own_tracks:
-            rng = np.random.default_rng(seed)
+            # 실패 시 남길 자리표시자. 에피소드 트랙은 reset 이 self.rng(환경 시드)로 다시 만든다.
+            # 자리표시자 시드를 한 칸 비켜 첫 reset 과 같은 형상이 되지 않게 한다.
+            ph = None if seed is None else int(seed) + 1_000_003
+            rng = np.random.default_rng(ph)
             tracks = [
                 make_random_track(cfg, rng) if n == "random" else load_track(n, cfg)
                 for n in names
@@ -110,7 +117,55 @@ class LidarFlyEnv(MaplessRaceEnv40):
         if own_tracks:
             w = np.asarray(weights, dtype=np.float64)
             self.track_p = w / w.sum()
+        # 부모 reset 은 시드가 있으면 self.rng 를 덮어쓴다. 에피소드 번호는 여기 두어
+        # 같은 시드로 reset 을 반복해도 트랙이 다시 뽑히게 한다.
+        self._base_seed = 0 if seed is None else int(seed)
+        self._random_ep = 0
         self._install_obs()
+
+    def _random_indices(self, options: dict | None) -> list[int]:
+        options = options or {}
+        if "map" in options:
+            if options["map"] != "random":
+                return []
+            for i, tr in enumerate(self.tracks):
+                if tr.name == "random":
+                    return [i]
+            return []
+        return [i for i, tr in enumerate(self.tracks) if tr.name == "random"]
+
+    def _episode_track_rng(self, seed: int | None) -> np.random.Generator:
+        """이번 에피소드의 트랙 난수. self.rng(환경 시드)에서 하나 뽑아 갈라낸다."""
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
+            self._base_seed = int(seed)
+        ep = self._random_ep
+        self._random_ep += 1
+        draw = int(self.rng.integers(0, 2**32))
+        return np.random.default_rng(np.random.SeedSequence([self._base_seed, ep, draw]))
+
+    def _rebuild_random_slot(self, idx: int, rng: np.random.Generator) -> None:
+        """random 슬롯을 교체. 실패하면 그 칸의 이전 트랙을 남긴다. name 은 'random'."""
+        prev = self.tracks[idx]
+        name = prev.name
+        for _ in range(_RANDOM_TRIES):
+            try:
+                tr = make_random_track(self.cfg, rng, name=name)
+            except Exception:
+                continue
+            line = tr.line
+            if line.length > 1.0 and np.isfinite(line.x).all() and np.isfinite(line.y).all():
+                self.tracks[idx] = tr
+                return
+
+    def reset(self, *, seed: int | None = None, options: dict | None = None):
+        # 부모 MaplessRaceEnv40.reset 이 self.tracks 에서 고르기 전에 random 칸을 갈아 끼운다.
+        idxs = self._random_indices(options)
+        if idxs:
+            rng = self._episode_track_rng(seed)
+            for i in idxs:
+                self._rebuild_random_slot(i, rng)
+        return super().reset(seed=seed, options=options)
 
     def _install_obs(self) -> None:
         c = self.cfg
@@ -130,7 +185,11 @@ class LidarFlyEnv(MaplessRaceEnv40):
         return preprocess_scan(raw, -sp.fov / 2.0, sp.angle_inc, sp)
 
 
-def make_env(maps=DEFAULT_MAPS, seed: int = 0, cfg: EnvConfig | None = None, **kw):
+def make_env(maps=DEFAULT_MAPS, seed: int = 0, cfg: EnvConfig | None = None,
+             rank: int = 0, **kw):
+    """병렬 env 팩토리. rank 마다 시드가 seed+rank 라 랜덤 맵이 갈라진다."""
+    env_seed = int(seed) + int(rank)
+
     def _f():
-        return LidarFlyEnv(maps=maps, cfg=cfg, seed=seed, **kw)
+        return LidarFlyEnv(maps=maps, cfg=cfg, seed=env_seed, **kw)
     return _f
