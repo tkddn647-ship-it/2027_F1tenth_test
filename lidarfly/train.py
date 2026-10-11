@@ -33,6 +33,14 @@ from mapless40.policy import AsymSACPolicy
 from mapless40.train import (LapEvalCallback, TimeLimitCallback, _PolicyWarmupSAC, _find_resume,
                              _safe_save)
 
+
+def _has_tb() -> bool:
+    try:
+        import tensorboard  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
 from .config import DEFAULT_MAPS, V_MAX, lidarfly_config
 from .env import LidarFlyEnv, make_env
 from .policy import LidarFlyFeatures
@@ -109,6 +117,7 @@ def main():
                        vec_env_cls=vec_cls)
     kw = policy_kwargs(args, cfg)
 
+    tb_log = str(save_dir / "tb") if _has_tb() else None
     resume = args.resume
     if resume == "auto":
         found = _find_resume(save_dir)
@@ -118,13 +127,15 @@ def main():
         model = SAC.load(resume, env=env, device=device)
         model.learning_starts = model.num_timesteps + min(args.learning_starts, 10_000)
         model.__class__ = _PolicyWarmupSAC
+        if tb_log:
+            model.tensorboard_log = tb_log
         reset_ts = False
     else:
         model = SAC(AsymSACPolicy, env, learning_rate=args.lr, buffer_size=args.buffer_size,
                     batch_size=args.batch_size, learning_starts=args.learning_starts, gamma=args.gamma,
                     tau=0.005, train_freq=1, gradient_steps=args.gradient_steps, ent_coef="auto",
                     target_entropy=args.target_entropy, policy_kwargs=kw, verbose=1,
-                    seed=args.seed, device=device)
+                    seed=args.seed, device=device, tensorboard_log=tb_log)
         reset_ts = True
     actor = model.policy.actor
     n_act = sum(p.numel() for p in actor.parameters())
