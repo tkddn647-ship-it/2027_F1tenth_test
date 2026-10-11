@@ -14,15 +14,17 @@ critic (학습 전용): 같은 회로 + 레이싱라인 privileged 27 → MLP 25
 
 차량 동역학·레이싱라인은 `mapless40`. `lidarfly_config()` 가 덮어쓰지 않은 값(μ, 횡가속 한계, `range_max` 10 m 등)은 `mapless40` `EnvConfig` 기본값이다. 그 주석은 `mapless40/config.py`.
 
-학습은 코랩 [`colab_train.ipynb`](colab_train.ipynb). 세션이 끊기면 ①과 ④만 다시 실행한다. `--resume auto` 가 `/content/drive/MyDrive/lidarfly_runs/v1` 의 `last_model.zip`(또는 더 최신 체크포인트)에서 이어 간다. **이 저장소 CI에서는 학습을 돌리지 않는다. 학습 필요.**
+학습은 코랩 [`colab_train.ipynb`](colab_train.ipynb). 세션이 끊기면 ①과 ④만 다시 실행한다. `--resume auto` 가 `/content/drive/MyDrive/lidarfly_runs/v1` 의 `last_model.zip`(또는 더 최신 체크포인트)에서 이어 간다. 노트북 `N_ENVS` 는 `min(os.cpu_count() or 1, 8)` (Colab CPU 코어 수, 상한 8). 맵 랜덤화는 CPU 병렬 env에서 돌고 GPU(T4)는 SAC 업데이트에만 쓰임. **이 저장소 CI에서는 학습을 돌리지 않는다. 학습 필요(미실행).**
 
 ```bash
 python -m lidarfly.tests
 python -m lidarfly.train --maps "ifac:3,roboracer_0817:3,random:2" --v-max 7 \
-    --timesteps 1000000 --save-dir runs/lidarfly --resume auto
+    --timesteps 1000000 --n-envs 4 --subproc --save-dir runs/lidarfly --resume auto
 python -m lidarfly.evaluate --model runs/lidarfly/best_model.zip \
     --maps ifac,roboracer_0817 --v-max 7
 ```
+
+`random` 맵은 에피소드 `reset` 마다 폐곡선을 다시 만든다. 병렬 env `i` 는 `--seed + i` 를 쓴다. `--n-envs N --seed S` 이면 시드는 `S .. S+N-1` 이고, env 마다 다른 랜덤 맵이 이어진다. `--subproc` 는 `SubprocVecEnv`, 없으면 `DummyVecEnv`. Windows 는 `train.py` 의 `if __name__ == "__main__"` 가드 아래에서 `--subproc` 가 동작하고, 문제가 나면 `--subproc` 없이 실행한다. 학습 시작 로그: `병렬 env N개, 시드 a..b, random 맵 에피소드마다 재생성`.
 
 torch 없는 numpy 배포(`np_actor`)는 아직 없다.
 
