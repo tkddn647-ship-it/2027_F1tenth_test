@@ -1,0 +1,43 @@
+# AI Office 설정 — 2027_F1tenth_test
+# engine: claude | cursor  (Claude Pro 한도가 빠듯하면 reviewer도 cursor로)
+
+# 모든 작업은 이 브랜치에서 (CLAUDE.md 규칙). PR도 이 브랜치로 올라갑니다.
+base_branch: feat/mapless40-asym-sac
+
+max_tasks: 3
+max_diff_chars: 60000
+
+project_notes: |
+  - 작업 전에 레포 루트의 CLAUDE.md를 먼저 읽고 그 규칙을 따른다.
+  - 실차 코드는 이슈가 그 폴더를 명시적으로 지목할 때만 수정한다:
+      Roboracer-2026-main/ (실차 ROS2 스택), realcar/ (실차 실행 스크립트).
+    실차 코드는 이 CI에서 실행·검증할 수 없으므로, 수정했다면 "실차 미검증"이라고 반드시 적는다.
+  - 레포 루트의 레거시 파일(train_sac_*.py, f1tenth_mapless_env.py, connectome_*.py, watch_*.py 등)은 새 작업에 쓰지 않는다.
+  - 모든 명령은 레포 루트에서 `python -m 패키지.모듈` 형태로 실행한다.
+  - 테스트: python -m mapless40.tests / python -m camera.camfly.tests / python -m camera.depthfly.tests
+    관련 테스트를 돌려 결과(통과 수)를 보고에 적는다.
+  - 학습(train)은 실행하지 않는다. CI에는 GPU가 없고 시간이 오래 걸린다. 학습이 필요한 작업이면 코드만 바꾸고 "학습 필요"라고 적는다.
+  - 학습 결과물(*.zip, 모델 파일)·맵·로그 데이터는 수정하거나 지우지 않는다.
+  - 추정값과 실측값을 섞지 않는다. 수치를 바꾸면 근거(데이터시트/실측/추정)를 적는다.
+  - 커밋 메시지, 보고, 리뷰는 한국어로.
+
+roles:
+  planner:
+    engine: claude
+    model: sonnet
+    max_turns: 10          # 레포가 커서 기본보다 약간 여유
+    allowed_tools: [Read, Grep, Glob]
+    timeout_sec: 900
+
+  builder:
+    engine: cursor
+    model: ""              # 비우면 계정 기본 모델. `cursor-agent models`로 목록 확인
+    extra_args: ["--force", "--trust"]   # "unknown option" 오류가 나면 해당 플래그 삭제
+    timeout_sec: 1800
+
+  reviewer:
+    engine: claude
+    model: sonnet
+    max_turns: 6
+    allowed_tools: [Read, Grep, Glob]
+    timeout_sec: 900
