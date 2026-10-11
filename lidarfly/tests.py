@@ -159,6 +159,40 @@ def test_random_track_changes_each_reset_and_by_seed():
     assert fixed.track.name == "ifac" and np.array_equal(fx, fixed.track.line.x)
 
 
+def test_random_track_built_only_when_selected():
+    """고정 맵이 뽑힌 에피소드에서는 random 폐곡선을 만들지 않는다."""
+    import lidarfly.env as envmod
+
+    env = LidarFlyEnv(maps="ifac:1,random:1", seed=0, sensor_noise=False, randomize=False)
+    calls = {"n": 0}
+    real = envmod.make_random_track
+
+    def wrapped(cfg, rng, name="random"):
+        calls["n"] += 1
+        return real(cfg, rng, name=name)
+
+    envmod.make_random_track = wrapped
+    try:
+        env.track_p = np.array([1.0, 0.0])
+        _, info = env.reset(seed=2)
+        assert info["map"] == "ifac" and calls["n"] == 0
+        _, info = env.reset()
+        assert info["map"] == "ifac" and calls["n"] == 0
+        _, info = env.reset(seed=4, options={
+            "map": "ifac", "s0": 1.0, "lat": 0.0, "dyaw": 0.0, "v0": 2.0, "n_obstacles": 0,
+        })
+        assert info["map"] == "ifac" and calls["n"] == 0
+
+        env.track_p = np.array([0.0, 1.0])
+        _, info = env.reset(seed=3)
+        assert info["map"] == "random" and calls["n"] >= 1
+        n_after = calls["n"]
+        env.reset(seed=3)
+        assert env.track.name == "random" and calls["n"] > n_after
+    finally:
+        envmod.make_random_track = real
+
+
 def test_random_rebuild_keeps_previous_on_failure():
     env = LidarFlyEnv(maps="random", seed=0, sensor_noise=False, randomize=False)
     prev = env.tracks[0]
@@ -376,6 +410,7 @@ def main():
         test_parse_weights,
         test_random_track_raceline,
         test_random_track_changes_each_reset_and_by_seed,
+        test_random_track_built_only_when_selected,
         test_random_rebuild_keeps_previous_on_failure,
         test_env_three_maps_obs_shape,
         test_reward_weights_arbitrary_init,
