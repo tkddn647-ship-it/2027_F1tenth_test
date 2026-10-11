@@ -125,7 +125,11 @@ def main():
         return _init
 
     env = vec_cls([_train_env(i) for i in range(args.n_envs)])
+    # VecEnv.seed 는 env i 에 seed+i 를 넣는다. make_env(rank=i) 와 같다.
     env.seed(args.seed)
+    seed_lo = int(args.seed)
+    seed_hi = seed_lo + int(args.n_envs) - 1
+    print(f"[train] 병렬 env {args.n_envs}개, 시드 {seed_lo}..{seed_hi}, random 맵 에피소드마다 재생성")
     kw = policy_kwargs(args, cfg)
 
     tb_log = str(save_dir / "tb") if _has_tb() else None
@@ -167,5 +171,7 @@ def main():
             print(f"[train] saved {save_dir / 'last_model.zip'}")
 
 
+# Windows spawn 에서 SubprocVecEnv 자식이 학습을 다시 시작하지 않게 가드.
+# 문제가 나면 --subproc 없이 DummyVecEnv 로 실행한다.
 if __name__ == "__main__":
     main()
