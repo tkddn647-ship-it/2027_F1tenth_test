@@ -125,11 +125,9 @@ def main():
         return _init
 
     env = vec_cls([_train_env(i) for i in range(args.n_envs)])
-    # VecEnv.seed 는 env i 에 seed+i 를 넣는다. make_env(rank=i) 와 같다.
-    env.seed(args.seed)
     seed_lo = int(args.seed)
     seed_hi = seed_lo + int(args.n_envs) - 1
-    print(f"[train] 병렬 env {args.n_envs}개, 시드 {seed_lo}..{seed_hi}, random 맵 에피소드마다 재생성")
+    print(f"[train] 병렬 env {args.n_envs}개, 시드 {seed_lo}..{seed_hi}, random 맵은 그 에피소드가 뽑혔을 때만 재생성")
     kw = policy_kwargs(args, cfg)
 
     tb_log = str(save_dir / "tb") if _has_tb() else None

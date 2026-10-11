@@ -8,11 +8,12 @@ MaplessRaceEnv40 차량·보상·레이싱라인. 관측만 LiDAR 1080빔 × 3�
   priv  (27,)     float32  — critic 전용. actor 에 넣지 않는다
 
 맵 문자열 "ifac:3,roboracer_0817:3,random:2" 의 random 은 자리표시자.
-reset 때 env 시드로 randmap 폐곡선을 다시 만든다.
+random 이 뽑힌 에피소드에서만 env 시드로 randmap 폐곡선을 다시 만든다.
 """
 
 from __future__ import annotations
 
+import copy
 from collections import deque
 
 import numpy as np
@@ -123,16 +124,27 @@ class LidarFlyEnv(MaplessRaceEnv40):
         self._random_ep = 0
         self._install_obs()
 
-    def _random_indices(self, options: dict | None) -> list[int]:
-        options = options or {}
+    def _rng_matching_parent(self, seed: int | None) -> np.random.Generator:
+        """부모 reset 이 트랙을 고를 때와 같은 난수. self.rng 는 바꾸지 않는다."""
+        if seed is not None:
+            return np.random.default_rng(seed)
+        rng = np.random.default_rng()
+        rng.bit_generator.state = copy.deepcopy(self.rng.bit_generator.state)
+        return rng
+
+    def _selected_track_index(self, seed: int | None, options: dict) -> int | None:
+        """이번 에피소드 트랙. random 이 아니면 None (폐곡선을 만들지 않음)."""
         if "map" in options:
             if options["map"] != "random":
-                return []
+                return None
             for i, tr in enumerate(self.tracks):
                 if tr.name == "random":
-                    return [i]
-            return []
-        return [i for i, tr in enumerate(self.tracks) if tr.name == "random"]
+                    return i
+            return None
+        idx = int(self._rng_matching_parent(seed).choice(len(self.tracks), p=self.track_p))
+        if self.tracks[idx].name != "random":
+            return None
+        return idx
 
     def _episode_track_rng(self, seed: int | None) -> np.random.Generator:
         """이번 에피소드의 트랙 난수. self.rng(환경 시드)에서 하나 뽑아 갈라낸다."""
@@ -159,12 +171,15 @@ class LidarFlyEnv(MaplessRaceEnv40):
                 return
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
-        # 부모 MaplessRaceEnv40.reset 이 self.tracks 에서 고르기 전에 random 칸을 갈아 끼운다.
-        idxs = self._random_indices(options)
-        if idxs:
-            rng = self._episode_track_rng(seed)
-            for i in idxs:
-                self._rebuild_random_slot(i, rng)
+        # 부모가 고른 칸이 random 일 때만 폐곡선을 만든다. ifac 등 고정 맵은 그대로 둔다.
+        options = options or {}
+        idx = self._selected_track_index(seed, options)
+        if idx is not None:
+            # seed 가 없으면 트랙 난수가 self.rng 를 한 번 쓴다. 부모의 맵 추첨은 원래 상태로 되돌린다.
+            saved = copy.deepcopy(self.rng.bit_generator.state) if seed is None else None
+            self._rebuild_random_slot(idx, self._episode_track_rng(seed))
+            if saved is not None:
+                self.rng.bit_generator.state = saved
         return super().reset(seed=seed, options=options)
 
     def _install_obs(self) -> None:
