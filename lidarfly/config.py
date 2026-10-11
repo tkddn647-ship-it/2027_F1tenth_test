@@ -25,6 +25,25 @@ HIST = 3                 # 현재 + 과거 2
 V_MIN = 2.0
 V_MAX = 7.0              # 사용자 지정. 실차 최고 속도 7 m/s 는 사용자 확인(2026-10-03)
 
+# 보상 가중치 — 임의 초기값 (튜닝 필요). 데이터시트·실측이 아니다.
+# MaplessRaceEnv40.step 이 이 값을 쓴다.
+#   + 레이싱라인 전진 진행 : w_progress * Δs
+#   − 라인 횡오차         : w_ey * e_y² * Δt
+#   − 곡률 대비 과속      : v > v_ref 이면 (w_v * over_mult) * (v − v_ref)² * Δt
+#                          v_ref 는 레이싱라인 곡률로 정한 속도.
+#                          w_alat 는 |v·ω| 가 alat_frac·a_lat_cap 을 넘을 때의 추가 감점.
+#   − 벽 근접             : w_wall (차체 옆 여유 < wall_clear)
+#   − 충돌                : collision (그 스텝 보상을 이 값으로 대체)
+#   + 속도 v_ref 추종     : v ≤ v_ref 이면 w_v * (v − v_ref)² * Δt 를 뺀다.
+#                          편차가 작을수록 보상이 크다.
+W_PROGRESS = 1.0
+W_EY = 0.5
+W_V_TRACK = 0.08
+OVER_MULT = 3.0
+W_ALAT = 1.0
+W_WALL = 2.0
+COLLISION = -20.0
+
 # 실측 전륜각. control_node.py max_steering_angle_rad = 0.3735
 # (20260816 요레이트 실측, S=1 → 약 21.4°). stanley max_steering_angle_real_rad 와 동일.
 STEER_MAX_RAD = 0.3735
@@ -79,4 +98,13 @@ def lidarfly_config() -> EnvConfig:
     c.act.jerk_max = 40.0              # 추정. control_node duty_rate_limit 0.6/s 의 mapless40 근사
     # 능동 브레이크 없음: control_node AUTO 속도 PI duty 하한 0 (코드 사실, 감속 크기 실측 아님).
     c.act.brake_enabled = False
+
+    # 임의 초기값 (튜닝 필요). 위 상수 한곳만 바꾼다.
+    c.reward.w_progress = W_PROGRESS
+    c.reward.w_ey = W_EY
+    c.reward.w_v = W_V_TRACK
+    c.reward.over_mult = OVER_MULT
+    c.reward.w_alat = W_ALAT
+    c.reward.w_wall = W_WALL
+    c.reward.collision = COLLISION
     return c

@@ -15,9 +15,15 @@ import numpy as np
 
 from mapless40.config import PRIV_DIM, EnvConfig, LidarSpec
 
+from camera.depthfly.brain import init_params, make_dn_wiring_bilateral, n_inputs, symmetric_init
+
+from .brain import (
+    BEAM_W, NEAR_REF_M, N_COLS, feature_layout, feature_meta, features_numpy, forward_numpy,
+    mirror_dn_index, scans_to_near_np,
+)
 from .config import (
-    FOV_DEG, HIST, N_BEAMS, SERVO_TAU_S, STEER_MAX_RAD, V_MAX, V_MIN,
-    lidarfly_config, state_dim,
+    COLLISION, FOV_DEG, HIST, N_BEAMS, OVER_MULT, SERVO_TAU_S, STEER_MAX_RAD, V_MAX, V_MIN,
+    W_ALAT, W_EY, W_PROGRESS, W_V_TRACK, W_WALL, lidarfly_config, state_dim,
 )
 from .env import LidarFlyEnv, parse_maps
 from .randmap import make_random_track
@@ -102,6 +108,197 @@ def test_env_three_maps_obs_shape():
         assert obs2["scan"].shape[0] == 3
 
 
+def test_reward_weights_arbitrary_init():
+    """보상 계수는 config 한곳. 진행·v_ref 추종은 양수 계수, 충돌은 음수."""
+    c = lidarfly_config()
+    assert c.reward.w_progress == W_PROGRESS > 0
+    assert c.reward.w_ey == W_EY > 0
+    assert c.reward.w_v == W_V_TRACK > 0          # v≤v_ref 편차 감점 → 추종할수록 보상 증가
+    assert c.reward.over_mult == OVER_MULT > 1    # v>v_ref (곡률이 정한 속도보다 빠름) 배율
+    assert c.reward.w_alat == W_ALAT > 0
+    assert c.reward.w_wall == W_WALL > 0
+    assert c.reward.collision == COLLISION < 0
+
+
+def _feat_slices():
+    o, g = 0, {}
+    for k, n in feature_layout().items():
+        g[k] = slice(o, o + n)
+        o += n
+    return g
+
+
+def test_pool_near_and_numpy_forward():
+    """구간 min/median → 1/거리 가까움, ON/OFF 방향, DN forward."""
+    col = np.linspace(0.2, 0.8, BEAM_W).astype(np.float32)
+    scan = np.ones((1, 3, N_BEAMS), np.float32)
+    scan[0, :, :BEAM_W] = col
+    rm = 10.0
+    near = scans_to_near_np(scan, rm)
+    assert near.shape == (1, 3, 2, N_COLS)
+    d_min, d_med = float(col.min()), float(np.median(col))
+    assert d_min < d_med
+    assert np.isclose(near[0, 0, 1, 0], np.clip(NEAR_REF_M / (d_min * rm), 0, 1))
+    assert np.isclose(near[0, 0, 0, 0], np.clip(NEAR_REF_M / (d_med * rm), 0, 1))
+    assert near[0, 0, 1, 0] > near[0, 0, 0, 0]
+    assert near.min() >= 0 and near.max() <= 1
+
+    p = init_params(n_inputs())
+    off = _feat_slices()
+
+    def blob(cols):
+        s = np.ones((1, 3, N_BEAMS), np.float32)
+        for t, c0 in enumerate(cols):
+            a = int(c0) * BEAM_W
+            s[0, t, a:a + 2 * BEAM_W] = 0.08
+        return s
+
+    hs_l = features_numpy(blob([20, 21, 22]), p, rm)[0, off["HS"]].sum()
+    hs_r = features_numpy(blob([22, 21, 20]), p, rm)[0, off["HS"]].sum()
+    assert hs_l > 0 > hs_r, (hs_l, hs_r)
+    still = features_numpy(blob([20, 20, 20]), p, rm)[0]
+    assert abs(still[off["HS"]].sum()) == 0 and still[off["LPLC2"]].sum() == 0
+
+    approach = np.full((1, 3, N_BEAMS), 0.9, np.float32)
+    retreat = approach.copy()
+    for t, d in enumerate((0.70, 0.45, 0.20)):
+        approach[0, t, 36 * BEAM_W:45 * BEAM_W] = d
+        retreat[0, 2 - t, 36 * BEAM_W:45 * BEAM_W] = d
+    lp_a = features_numpy(approach, p, rm)[0, off["LPLC2"]][4]
+    lp_r = features_numpy(retreat, p, rm)[0, off["LPLC2"]][4]
+    assert lp_a > 0 and lp_a > lp_r, (lp_a, lp_r)
+
+    mask, sign = make_dn_wiring_bilateral()
+    out = forward_numpy(approach, p, mask, sign, rm)
+    assert out.shape == (1, 48) and np.all(np.abs(out) < 1)
+
+
+def test_bilateral_polarity():
+    """같은 쪽 흥분·반대쪽 억제. 세기만 학습(부호 버퍼). 좌우 뒤집으면 짝 DN 이 같다."""
+    meta, sect, mirror = feature_meta()
+    is_hs = np.array([m[0] == "HS" for m in meta])
+    is_left = sect >= 4
+    n_dn, n_mid, fan_in = 48, 8, 12
+    n_pair = (n_dn - n_mid) // 2
+    mask, sign = make_dn_wiring_bilateral(n_dn, fan_in, seed=0, n_mid=n_mid)
+    for i in range(n_pair):
+        idx = np.flatnonzero(mask[i] > 0)
+        assert idx.size == fan_in
+        for j in idx:
+            if is_hs[j]:
+                assert sign[i, j] == 1.0
+            else:
+                assert sign[i, j] == (1.0 if is_left[j] else -1.0)
+        j_dn = n_pair + i
+        midx = mirror[idx]
+        assert np.all(mask[j_dn, midx] == 1.0)
+        for a, b in zip(idx, midx):
+            if is_hs[a]:
+                assert sign[j_dn, b] == -sign[i, a]
+            else:
+                assert sign[j_dn, b] == sign[i, a]
+    for k in range(n_mid):
+        i = 2 * n_pair + k
+        idx = np.flatnonzero(mask[i] > 0)
+        assert idx.size == fan_in
+        left = idx[is_left[idx]]
+        assert left.size == fan_in // 2
+        assert set(mirror[left].tolist()) == set(idx[~is_left[idx]].tolist())
+        for j in idx:
+            if is_hs[j]:
+                assert sign[i, j] == (1.0 if is_left[j] else -1.0)
+            else:
+                assert sign[i, j] == -1.0
+
+    p = symmetric_init(init_params(n_inputs(), n_dn, seed=0), n_dn, n_mid)
+    rng = np.random.default_rng(0)
+    scan = rng.uniform(0.05, 1.0, (2, 3, N_BEAMS)).astype(np.float32)
+    y = forward_numpy(scan, p, mask, sign, 10.0)
+    y_flip = forward_numpy(scan[..., ::-1].copy(), p, mask, sign, 10.0)
+    err = np.max(np.abs(y_flip[:, mirror_dn_index(n_dn, n_mid)] - y))
+    assert err < 1e-5, err
+
+
+def _torch_ok():
+    try:
+        import stable_baselines3  # noqa: F401
+        import torch  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def test_brain_torch_equals_numpy():
+    import torch
+    from .brain import LidarFlyBrain
+    m = LidarFlyBrain(seed=0)
+    mask_np, sign_np = make_dn_wiring_bilateral(seed=0)
+    assert np.array_equal(m.mask.detach().cpu().numpy(), mask_np)
+    assert np.array_equal(m.sign.detach().cpu().numpy(), sign_np)
+    assert not m.sign.requires_grad and m.core.w_dn.requires_grad
+    x = np.random.default_rng(1).uniform(0.05, 1.0, (4, 3, N_BEAMS)).astype(np.float32)
+    rm = float(m.range_max)
+    ref = forward_numpy(x, m.numpy_params(), m.mask.detach().cpu().numpy(),
+                        m.sign.detach().cpu().numpy(), rm)
+    xt = torch.from_numpy(x)
+    with torch.no_grad():
+        out = m(xt).numpy()
+    assert np.allclose(ref, out, atol=1e-4), float(np.abs(ref - out).max())
+    y = m(xt).sum()
+    y.backward()
+    g = m.core.w_dn.grad
+    assert g is not None and float(g.abs().sum()) > 0
+
+
+def test_train_cli_and_short_learn():
+    """--save-dir / --resume auto / --v-max 7 / pi=[] .  정책 생성 후 몇 스텝만 업데이트."""
+    import torch
+    from torch import nn
+    from stable_baselines3 import SAC
+    from mapless40.config import PRIV_DIM
+    from mapless40.policy import AsymSACPolicy
+    from .train import apply_train_cfg, build_parser, policy_kwargs
+
+    args = build_parser().parse_args(["--save-dir", "runs/lidarfly_smoke", "--resume", "auto", "--v-max", "7"])
+    assert args.save_dir == "runs/lidarfly_smoke" and args.resume == "auto"
+    assert args.v_max == 7.0 and args.pi_net == ""
+    cfg = apply_train_cfg(args)
+    assert cfg.action.v_max == 7.0 and cfg.raceline.v_max == 7.0
+    kw = policy_kwargs(args, cfg)
+    assert kw["net_arch"]["pi"] == [] and kw["net_arch"]["qf"] == [256, 256]
+
+    env = LidarFlyEnv(maps="ifac", seed=0, sensor_noise=False, randomize=False)
+    smoke = dict(kw)
+    smoke["net_arch"] = dict(pi=[], qf=[32, 32])
+    model = SAC(AsymSACPolicy, env, learning_starts=8, batch_size=8, buffer_size=64,
+                gradient_steps=1, train_freq=1, policy_kwargs=smoke, verbose=0,
+                seed=0, device="cpu")
+    actor, critic = model.policy.actor, model.policy.critic
+    assert not actor.features_extractor.use_priv and critic.features_extractor.use_priv
+    assert actor.features_extractor.features_dim + PRIV_DIM == critic.features_extractor.features_dim
+    assert PRIV_DIM == 27
+    assert isinstance(actor.mu, nn.Linear) and actor.mu.out_features == 2
+    assert actor.mu.in_features == 48 + state_dim(3)
+    assert sum(p.numel() for p in actor.latent_pi.parameters()) == 0
+    assert not any(isinstance(mod, (nn.Conv1d, nn.Conv2d)) for mod in actor.modules())
+    obs, _ = env.reset(seed=0, options={"map": "ifac", "s0": 1.0, "lat": 0.0, "dyaw": 0.0,
+                                        "v0": 2.0, "n_obstacles": 0})
+    batch = {k: torch.from_numpy(np.asarray(v)[None]) for k, v in obs.items()}
+    with torch.no_grad():
+        a1 = actor.features_extractor(batch)
+        bumped = {k: v.clone() for k, v in batch.items()}
+        bumped["priv"] = bumped["priv"] + 1
+        a2 = actor.features_extractor(bumped)
+        c1 = critic.features_extractor(batch)
+        c2 = critic.features_extractor(bumped)
+    assert torch.allclose(a1, a2)
+    assert not torch.allclose(c1, c2)
+    before = actor.features_extractor.brain.core.w_dn.detach().clone()
+    model.learn(total_timesteps=20)
+    after = actor.features_extractor.brain.core.w_dn.detach()
+    assert not torch.equal(before, after)
+
+
 def main():
     tests = [
         test_mapless40_defaults_unchanged,
@@ -109,7 +306,14 @@ def main():
         test_parse_weights,
         test_random_track_raceline,
         test_env_three_maps_obs_shape,
+        test_reward_weights_arbitrary_init,
+        test_pool_near_and_numpy_forward,
+        test_bilateral_polarity,
     ]
+    if _torch_ok():
+        tests += [test_brain_torch_equals_numpy, test_train_cli_and_short_learn]
+    else:
+        print("(torch / stable-baselines3 없음 → torch 테스트 건너뜀)")
     failed = 0
     for t in tests:
         t0 = time.time()
