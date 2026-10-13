@@ -1,6 +1,8 @@
 # AI Office (이 레포용)
 
-이슈에 `ai-office` 라벨을 붙이면 Claude(기획·리뷰)와 Cursor(구현)가 작업하고,
+본체는 중앙 레포 [tkddn647-ship-it/ai-office](https://github.com/tkddn647-ship-it/ai-office). 이 레포에는 `office/config.yaml`(설정)만 있다.
+
+이슈에 `ai-office` 라벨을 붙이면 Claude(기획)·Cursor(구현)·Gemini(리뷰, 안 되면 Claude)가 작업하고,
 **`feat/mapless40-asym-sac` 브랜치로** PR을 올립니다. 자동 머지는 하지 않습니다.
 
 ```
@@ -9,7 +11,7 @@
        └ 막히는 질문이 있으면 → 이슈에 질문 댓글 + 라벨 자동 제거 → 멈춤 (작업 안 함)
   → Builder  (Cursor)             작업마다 구현
   → CI 테스트 (오케스트레이터가 직접 실행)  tests.py가 있는 패키지를 자동으로 찾아 전부 실행
-  → Reviewer (Claude, 읽기 전용)  diff + Builder 보고 + CI 결과로 판정
+  → Reviewer (Gemini → 실패 시 Claude, 읽기 전용)  diff + Builder 보고 + CI 결과로 판정
   → PR → feat/mapless40-asym-sac
        ├ APPROVE + 테스트 통과 → 일반 PR
        └ 수정 요청 / 테스트 실패 / 작업 실패 → Draft PR + `needs-human` 라벨 + 경고 배너
@@ -20,6 +22,7 @@
 1. **Settings → Secrets and variables → Actions**에 등록 (테스트 레포와 별개라 다시 넣어야 함)
    - `CLAUDE_CODE_OAUTH_TOKEN` — `claude setup-token`으로 발급
    - `CURSOR_API_KEY` — https://cursor.com/dashboard/api
+   - `GEMINI_API_KEY` — https://aistudio.google.com/apikey (없으면 리뷰는 Claude가 대신)
 2. **Settings → Actions → General → Workflow permissions**
    - Read and write permissions
    - Allow GitHub Actions to create and approve pull requests 체크

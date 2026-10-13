@@ -1,11 +1,18 @@
 # AI Office 설정 — 2027_F1tenth_test
-# engine: claude | cursor  (Claude Pro 한도가 빠듯하면 reviewer도 cursor로)
+# 본체는 중앙 레포 tkddn647-ship-it/ai-office. 이 레포는 이 설정만 가진다.
+# engine: claude | cursor | gemini  (fallback_engine: 실패하면 대신 쓸 엔진)
 
 # 모든 작업은 이 브랜치에서 (CLAUDE.md 규칙). PR도 이 브랜치로 올라갑니다.
 base_branch: feat/mapless40-asym-sac
 
 max_tasks: 3
 max_diff_chars: 60000
+
+# 실행 전 준비 (GitHub 서버에서 매번): 프로젝트 테스트용 의존성 (CLAUDE.md §2).
+# torch는 CPU 전용 빌드 (기본 빌드는 GPU 라이브러리 ~2GB)
+setup_commands:
+  - pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+  - pip install -q "stable-baselines3>=2.3" "gymnasium>=0.29" numpy scipy pyyaml pillow matplotlib tensorboard
 
 # Builder가 끝난 뒤 오케스트레이터가 직접 돌리는 테스트 (CLAUDE.md §2, §7 "커밋 전 tests")
 # Builder 보고와 별개의 객관적 확인. 결과는 PR과 리뷰어에게 전달됩니다.
@@ -52,9 +59,14 @@ roles:
     extra_args: ["--force", "--trust"]   # "unknown option" 오류가 나면 해당 플래그 삭제
     timeout_sec: 1800
 
+  # 교차 리뷰: 기획(Claude)·구현(Cursor)과 다른 회사 모델. Gemini가 안 되면(키 없음·한도) Claude로 대신.
+  # 공개 레포라 코드가 Gemini 무료 등급(사람 검토 가능)에 가도 추가로 드러나는 것은 없다.
   reviewer:
-    engine: claude
-    model: sonnet
-    max_turns: 6
-    allowed_tools: [Read, Grep, Glob]
+    engine: gemini
+    model: ""              # 비우면 Gemini CLI 기본(auto)
     timeout_sec: 900
+    fallback_engine: claude
+    fallback:
+      model: sonnet
+      max_turns: 6
+      allowed_tools: [Read, Grep, Glob]
