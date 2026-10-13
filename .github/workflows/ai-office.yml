@@ -1,23 +1,21 @@
+# 각 레포의 .github/workflows/ai-office.yml — 이 파일은 거의 바뀔 일이 없다.
+# 실제 동작은 중앙 레포 tkddn647-ship-it/ai-office 에 있고, 레포별 설정은 office/config.yaml 에 있다.
 name: AI Office
 
 on:
-  # 이슈에 "ai-office" 라벨을 붙이면 실행
   issues:
-    types: [labeled]
-  # PR(또는 그 PR을 만든 이슈)에 "/ai-office fix" 댓글 → 리뷰 지적 수정
+    types: [labeled]               # 이슈에 ai-office 라벨
   issue_comment:
-    types: [created]
-  # Actions 탭에서 수동 실행
+    types: [created]               # PR(또는 그 이슈)에 /ai-office fix
   workflow_dispatch:
     inputs:
       issue_number:
         description: "처리할 이슈 번호 (새 작업)"
         required: false
       pr_number:
-        description: "고칠 PR 번호 (수정 라운드). 이걸 넣으면 issue_number는 무시"
+        description: "고칠 PR 번호 (수정 라운드)"
         required: false
 
-# 한 번에 하나만 실행 → 구독 한도를 동시에 태우지 않음
 concurrency:
   group: ai-office
   cancel-in-progress: false
@@ -29,88 +27,12 @@ permissions:
 
 jobs:
   office:
-    # 수정 라운드는 저장소 소유자·협업자의 댓글만 받는다 (공개 저장소에서 남이 실행시키는 것 방지)
+    # /ai-office fix 는 저장소 소유자·협업자 댓글만 (공개 레포에서 남이 실행시키는 것 방지)
     if: >-
       (github.event_name == 'issues' && github.event.label.name == 'ai-office') ||
       (github.event_name == 'issue_comment' &&
        startsWith(github.event.comment.body, '/ai-office fix') &&
        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
       github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      GH_TOKEN: ${{ github.token }}
-      # 댓글을 달 이슈/PR 번호, 수정 라운드면 PR 번호
-      TARGET_NUMBER: ${{ github.event.issue.number || inputs.pr_number || inputs.issue_number }}
-      AI_OFFICE_FIX_PR: ${{ (github.event_name == 'issue_comment' && github.event.issue.number) || inputs.pr_number || '' }}
-      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      # 이번 실행을 일으킨 댓글 본문 (명령 뒤 지시). 셸에 직접 넣지 않고 환경변수로만 전달
-      AI_OFFICE_FIX_REQUEST: ${{ github.event.comment.body }}
-    steps:
-      # 설치에 몇 분 걸리니, 받았다는 걸 먼저 알린다
-      - name: Announce start
-        if: env.TARGET_NUMBER != ''
-        run: |
-          if [ -n "$AI_OFFICE_FIX_PR" ]; then WHAT="🔧 수정 라운드를 시작합니다"; else WHAT="🏃 작업을 시작합니다"; fi
-          gh api "repos/$GITHUB_REPOSITORY/issues/$TARGET_NUMBER/comments" \
-            -f body="$WHAT (보통 5~15분). 진행 상황: $RUN_URL" > /dev/null || true
-
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Install tools
-        run: |
-          pip install pyyaml
-          # 프로젝트 테스트용 의존성 (CLAUDE.md §2). torch는 CPU 전용 빌드로 (기본 빌드는 GPU 라이브러리 ~2GB)
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install "stable-baselines3>=2.3" "gymnasium>=0.29" numpy scipy pillow matplotlib tensorboard
-          npm install -g @anthropic-ai/claude-code
-          curl https://cursor.com/install -fsS | bash
-          # 설치 경로가 버전마다 달라서 둘 다 추가
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          echo "$HOME/.cursor/bin" >> "$GITHUB_PATH"
-
-      - name: Check tools
-        run: |
-          claude --version
-          cursor-agent --version
-
-      # office/를 임시 폴더로 복사: 작업 브랜치(base_branch)에 office/가 없어도 실행되고, 로그가 커밋에 섞이지 않음
-      - name: Stage AI Office
-        run: |
-          cp -r office "$RUNNER_TEMP/office"
-          mkdir -p "$RUNNER_TEMP/ai-office-logs"
-
-      - name: Run AI Office
-        env:
-          # Claude Pro 구독 토큰 (`claude setup-token`으로 발급)
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # Cursor 대시보드에서 발급한 API 키
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
-          AI_OFFICE_REPO_ROOT: ${{ github.workspace }}
-          AI_OFFICE_LOG_DIR: ${{ runner.temp }}/ai-office-logs
-        run: python "$RUNNER_TEMP/office/orchestrator.py"
-
-      - name: Report failure
-        if: failure() && env.TARGET_NUMBER != ''
-        run: |
-          gh api "repos/$GITHUB_REPOSITORY/issues/$TARGET_NUMBER/comments" \
-            -f body="❌ AI Office 실행이 실패했습니다. 빨간 단계의 로그를 확인하세요: $RUN_URL" > /dev/null || true
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ai-office-logs
-          path: ${{ runner.temp }}/ai-office-logs/
-          if-no-files-found: ignore
+    uses: tkddn647-ship-it/ai-office/.github/workflows/office.yml@main
+    secrets: inherit
