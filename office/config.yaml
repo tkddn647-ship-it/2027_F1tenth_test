@@ -63,7 +63,7 @@ roles:
   # 공개 레포라 코드가 Gemini 무료 등급(사람 검토 가능)에 가도 추가로 드러나는 것은 없다.
   reviewer:
     engine: gemini
-    model: ""              # 비우면 Gemini CLI 기본(auto)
+    model: ""              # 비우면 gemini-flash-latest
     timeout_sec: 900
     fallback_engine: claude
     fallback:
