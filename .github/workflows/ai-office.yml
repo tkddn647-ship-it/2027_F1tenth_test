@@ -31,7 +31,10 @@ jobs:
     if: >-
       (github.event_name == 'issues' && github.event.label.name == 'ai-office') ||
       (github.event_name == 'issue_comment' &&
-       startsWith(github.event.comment.body, '/ai-office fix') &&
+       (startsWith(github.event.comment.body, '/ai-office fix') ||
+        startsWith(github.event.comment.body, '@팀장') ||
+        startsWith(github.event.comment.body, '@개발') ||
+        startsWith(github.event.comment.body, '@리뷰')) &&
        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
       github.event_name == 'workflow_dispatch'
     uses: tkddn647-ship-it/ai-office/.github/workflows/office.yml@main
