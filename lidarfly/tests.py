@@ -159,6 +159,40 @@ def test_random_track_changes_each_reset_and_by_seed():
     assert fixed.track.name == "ifac" and np.array_equal(fx, fixed.track.line.x)
 
 
+def test_random_track_built_only_when_selected():
+    """고정 맵이 뽑힌 에피소드에서는 random 폐곡선을 만들지 않는다."""
+    import lidarfly.env as envmod
+
+    env = LidarFlyEnv(maps="ifac:1,random:1", seed=0, sensor_noise=False, randomize=False)
+    calls = {"n": 0}
+    real = envmod.make_random_track
+
+    def wrapped(cfg, rng, name="random"):
+        calls["n"] += 1
+        return real(cfg, rng, name=name)
+
+    envmod.make_random_track = wrapped
+    try:
+        env.track_p = np.array([1.0, 0.0])
+        _, info = env.reset(seed=2)
+        assert info["map"] == "ifac" and calls["n"] == 0
+        _, info = env.reset()
+        assert info["map"] == "ifac" and calls["n"] == 0
+        _, info = env.reset(seed=4, options={
+            "map": "ifac", "s0": 1.0, "lat": 0.0, "dyaw": 0.0, "v0": 2.0, "n_obstacles": 0,
+        })
+        assert info["map"] == "ifac" and calls["n"] == 0
+
+        env.track_p = np.array([0.0, 1.0])
+        _, info = env.reset(seed=3)
+        assert info["map"] == "random" and calls["n"] >= 1
+        n_after = calls["n"]
+        env.reset(seed=3)
+        assert env.track.name == "random" and calls["n"] > n_after
+    finally:
+        envmod.make_random_track = real
+
+
 def test_random_rebuild_keeps_previous_on_failure():
     env = LidarFlyEnv(maps="random", seed=0, sensor_noise=False, randomize=False)
     prev = env.tracks[0]
@@ -369,6 +403,86 @@ def test_train_cli_and_short_learn():
     assert not torch.equal(before, after)
 
 
+def test_compile_brains_matches_eager():
+    """--compile: 회로 출력·기울기가 eager 와 같고, 저장한 zip 을 컴파일 없이 다시 읽어도 같은 행동."""
+    import tempfile
+    import torch
+    from stable_baselines3 import SAC
+    from mapless40.policy import AsymSACPolicy
+    from .train import apply_train_cfg, build_parser, compile_brains, policy_kwargs
+
+    args = build_parser().parse_args(["--compile"])
+    assert args.compile
+    cfg = apply_train_cfg(args)
+    env = LidarFlyEnv(maps="ifac", seed=0, sensor_noise=False, randomize=False)
+    kw = policy_kwargs(args, cfg)
+    kw["net_arch"] = dict(pi=[], qf=[32, 32])
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    model = SAC(AsymSACPolicy, env, learning_starts=8, batch_size=8, buffer_size=64, gradient_steps=1,
+                policy_kwargs=kw, verbose=0, seed=0, device=dev)
+    brain = model.policy.actor.features_extractor.brain
+    scan = torch.rand(16, 3, 1080, device=dev) * 0.9 + 0.05
+    s1 = scan.clone().requires_grad_(True)
+    y_eager = brain(s1)
+    y_eager.sum().backward()
+    g_eager = brain.core.w_dn.grad.clone()
+    brain.core.w_dn.grad = None
+    compile_brains(model)
+    s2 = scan.clone().requires_grad_(True)
+    y_comp = brain(s2)
+    y_comp.sum().backward()
+    assert torch.allclose(y_eager, y_comp, atol=1e-5), float((y_eager - y_comp).abs().max())
+    assert torch.allclose(g_eager, brain.core.w_dn.grad, atol=1e-4, rtol=1e-4)
+    model.learn(total_timesteps=16)
+    obs, _ = env.reset(seed=0, options={"map": "ifac", "s0": 1.0, "lat": 0.0, "dyaw": 0.0,
+                                        "v0": 2.0, "n_obstacles": 0})
+    a1 = model.predict(obs, deterministic=True)[0]
+    with tempfile.TemporaryDirectory() as d:
+        model.save(f"{d}/m.zip")
+        a2 = SAC.load(f"{d}/m.zip", device=dev).predict(obs, deterministic=True)[0]
+    assert np.allclose(a1, a2, atol=1e-5), (a1, a2)
+
+
+def test_bc_handoff_torch():
+    """lidarfly.bc 학생 npz → --bc-init 으로 SAC actor 에 넣으면 결정적 행동이 학생과 같다."""
+    import tempfile
+    import torch
+    from stable_baselines3 import SAC
+    from mapless40.policy import AsymSACPolicy
+    from .bc import LidarStudent, make_cfg
+    from .train import apply_train_cfg, build_parser, load_bc_init, policy_kwargs
+
+    cfg = make_cfg(7.0)
+    env = LidarFlyEnv(maps="ifac", cfg=cfg, seed=0, sensor_noise=False, randomize=False)
+    st = LidarStudent(seed=0)
+    st.range_max = float(cfg.lidar.range_max)
+    rng = np.random.default_rng(3)
+    st.mu_w += rng.normal(0, 0.3, st.mu_w.shape).astype(np.float32)   # 0 근처가 아닌 행동이 나오게
+    st.p["w_dn"] += rng.normal(0, 0.3, st.p["w_dn"].shape).astype(np.float32)
+    args = build_parser().parse_args(["--v-max", "7"])
+    kw = policy_kwargs(args, apply_train_cfg(args))
+    kw["net_arch"] = dict(pi=[], qf=[32, 32])
+    model = SAC(AsymSACPolicy, env, learning_starts=8, batch_size=8, buffer_size=64, policy_kwargs=kw,
+                verbose=0, seed=0, device="cpu")
+    with tempfile.TemporaryDirectory() as d:
+        st.save(f"{d}/b.npz", {"v_max": 7.0, "range_max": st.range_max, "sensor": "lidar1080", "iter": 0})
+        load_bc_init(model, f"{d}/b.npz", cfg, -2.3)
+        st2 = LidarStudent.load(f"{d}/b.npz")
+    obs, _ = env.reset(seed=0, options={"map": "ifac", "s0": 5.0, "lat": 0.1, "dyaw": 0.05,
+                                        "v0": 3.0, "n_obstacles": 0})
+    for _ in range(5):
+        a_sac = model.predict(obs, deterministic=True)[0]
+        a_st, a_st2 = st(obs), st2(obs)
+        assert np.allclose(a_sac, a_st, atol=1e-4), (a_sac, a_st)
+        assert np.allclose(a_st, a_st2)
+        assert np.abs(a_st).max() > 0.05
+        obs, *_ = env.step(a_st)
+    ls = model.policy.actor.log_std.bias.detach().numpy()
+    assert np.allclose(ls, -2.3)
+    tgt, crit = model.policy.critic_target.state_dict(), model.policy.critic.state_dict()
+    assert all(torch.equal(tgt[k], crit[k]) for k in crit)
+
+
 def main():
     tests = [
         test_mapless40_defaults_unchanged,
@@ -376,6 +490,7 @@ def main():
         test_parse_weights,
         test_random_track_raceline,
         test_random_track_changes_each_reset_and_by_seed,
+        test_random_track_built_only_when_selected,
         test_random_rebuild_keeps_previous_on_failure,
         test_env_three_maps_obs_shape,
         test_reward_weights_arbitrary_init,
@@ -383,7 +498,7 @@ def main():
         test_bilateral_polarity,
     ]
     if _torch_ok():
-        tests += [test_brain_torch_equals_numpy, test_train_cli_and_short_learn]
+        tests += [test_brain_torch_equals_numpy, test_train_cli_and_short_learn, test_compile_brains_matches_eager, test_bc_handoff_torch]
     else:
         print("(torch / stable-baselines3 없음 → torch 테스트 건너뜀)")
     failed = 0

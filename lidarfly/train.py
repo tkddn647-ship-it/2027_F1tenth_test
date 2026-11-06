@@ -66,7 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--gamma", type=float, default=GAMMA_40HZ,
                    help="기본 0.99**0.25 (40 Hz 에서 0.1 s 당 0.99)")
-    p.add_argument("--target-entropy", type=float, default=-1.0)
+    p.add_argument("--target-entropy", type=float, default=None,
+                   help="기본: -1 (무작위 시작) / -3.5 (--bc-init: σ≈0.1 정책 엔트로피보다 낮게, depthfly v3 와 같음)")
     p.add_argument("--max-episode-s", type=float, default=60.0)
     p.add_argument("--eval-freq", type=int, default=50_000)
     p.add_argument("--ckpt-freq", type=int, default=100_000)
@@ -74,7 +75,69 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--save-dir", default=None)
     p.add_argument("--resume", default=None, help="이어 학습할 zip, 또는 auto (save-dir 안 최신 모델)")
     p.add_argument("--time-limit-min", type=float, default=0)
+    p.add_argument("--bc-init", default=None, help="모방학습 결과 npz (lidarfly.bc) 로 actor·critic 회로를 시작")
+    p.add_argument("--actor-freeze-steps", type=int, default=30_000,
+                   help="--bc-init 일 때 처음 이만큼은 critic 만 학습 (엉터리 critic 이 모방한 정책을 망가뜨리는 것 방지)")
+    p.add_argument("--ent-init", type=float, default=0.02, help="--bc-init 일 때 엔트로피 계수 시작값 (auto 기본은 1.0)")
+    p.add_argument("--bc-log-std", type=float, default=-2.3, help="--bc-init 일 때 행동 잡음 log σ 시작값 (σ≈0.1)")
+    p.add_argument("--compile", action="store_true",
+                   help="커넥톰 회로 forward 를 torch.compile (작은 커널을 합쳐 GPU 업데이트 약 2배, 알고리즘 동일)")
     return p
+
+
+def _ensure_python_headers() -> None:
+    """torch.compile(inductor) 가 C 확장을 빌드할 때 Python.h 가 필요하다.
+    시스템에 python3-dev 가 없으면 uv 가 받은 같은 마이너 버전 Python 의 헤더를 CPATH 에 넣는다."""
+    import os
+    import sys
+    import sysconfig
+    inc = Path(sysconfig.get_paths()["include"])
+    if (inc / "Python.h").exists():
+        return
+    ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    for h in sorted(Path.home().glob(f".local/share/uv/python/cpython-{sys.version_info.major}."
+                                     f"{sys.version_info.minor}*/include/{ver}/Python.h")):
+        os.environ["CPATH"] = f"{h.parent}:{os.environ['CPATH']}" if os.environ.get("CPATH") else str(h.parent)
+        print(f"[train] Python.h 없음 → {h.parent} 사용", flush=True)
+        return
+    raise SystemExit("--compile: Python.h 가 없다. python3-dev 를 설치하거나 `uv python install "
+                     f"{sys.version_info.major}.{sys.version_info.minor}` 후 다시 실행")
+
+
+def load_bc_init(model, path, cfg, log_std: float) -> None:
+    """lidarfly.bc 결과를 SAC 정책에 넣는다: 회로(actor·critic·target) + actor 읽기층 μ, 잡음 σ 는 작게."""
+    import numpy as np
+    from camera.depthfly.brain import PARAM_KEYS
+    d = np.load(path, allow_pickle=False)
+    meta = json.loads(str(d["meta"]))
+    if meta.get("sensor") != "lidar1080":
+        raise SystemExit(f"[bc-init] {path} 는 lidarfly.bc 결과가 아니다 (sensor={meta.get('sensor')})")
+    if abs(float(meta["v_max"]) - cfg.action.v_max) > 1e-6:
+        raise SystemExit(f"[bc-init] v_max 불일치: npz {meta['v_max']} vs 학습 {cfg.action.v_max} — 같은 --v-max 로")
+    if abs(float(meta["range_max"]) - cfg.lidar.range_max) > 1e-6:
+        raise SystemExit(f"[bc-init] range_max 불일치: npz {meta['range_max']} vs 학습 {cfg.lidar.range_max}")
+    pol = model.policy
+    with torch.no_grad():
+        for fe in (pol.actor.features_extractor, pol.critic.features_extractor):
+            core = fe.brain.core
+            for k in PARAM_KEYS:
+                getattr(core, k).copy_(torch.from_numpy(d[f"brain.{k}"]))
+            if not (torch.equal(core.mask.cpu(), torch.from_numpy(d["mask"]))
+                    and torch.equal(core.sign.cpu(), torch.from_numpy(d["sign"]))):
+                raise SystemExit("[bc-init] DN 배선(mask/sign)이 다르다 — n_dn·fan_in·seed 확인")
+        pol.actor.mu.weight.copy_(torch.from_numpy(d["mu_w"])); pol.actor.mu.bias.copy_(torch.from_numpy(d["mu_b"]))
+        pol.actor.log_std.weight.zero_(); pol.actor.log_std.bias.fill_(log_std)
+    pol.critic_target.load_state_dict(pol.critic.state_dict())
+    print(f"[bc-init] {path} (모방학습 반복 {meta.get('iter')}, 시험 {meta.get('eval')})", flush=True)
+
+
+def compile_brains(model) -> None:
+    """actor·critic·target critic 의 커넥톰 회로 forward 를 torch.compile. 가중치·저장 형식은 그대로."""
+    _ensure_python_headers()
+    for net in (model.policy.actor, model.policy.critic, model.policy.critic_target):
+        brain = net.features_extractor.brain
+        brain.forward = torch.compile(brain.forward, dynamic=False)
+    print("[train] torch.compile: 커넥톰 회로 (actor·critic·target)", flush=True)
 
 
 def _net_list(s: str) -> list[int]:
@@ -104,6 +167,8 @@ def main():
     device = args.device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    if args.target_entropy is None:
+        args.target_entropy = -3.5 if args.bc_init else -1.0
     cfg = apply_train_cfg(args)
     maps = [m for m in args.maps.split(",") if m]
     eval_maps = [m for m in args.eval_maps.split(",") if m]
@@ -125,11 +190,9 @@ def main():
         return _init
 
     env = vec_cls([_train_env(i) for i in range(args.n_envs)])
-    # VecEnv.seed 는 env i 에 seed+i 를 넣는다. make_env(rank=i) 와 같다.
-    env.seed(args.seed)
     seed_lo = int(args.seed)
     seed_hi = seed_lo + int(args.n_envs) - 1
-    print(f"[train] 병렬 env {args.n_envs}개, 시드 {seed_lo}..{seed_hi}, random 맵 에피소드마다 재생성")
+    print(f"[train] 병렬 env {args.n_envs}개, 시드 {seed_lo}..{seed_hi}, random 맵은 그 에피소드가 뽑혔을 때만 재생성")
     kw = policy_kwargs(args, cfg)
 
     tb_log = str(save_dir / "tb") if _has_tb() else None
@@ -148,10 +211,16 @@ def main():
     else:
         model = SAC(AsymSACPolicy, env, learning_rate=args.lr, buffer_size=args.buffer_size,
                     batch_size=args.batch_size, learning_starts=args.learning_starts, gamma=args.gamma,
-                    tau=0.005, train_freq=1, gradient_steps=args.gradient_steps, ent_coef="auto",
+                    tau=0.005, train_freq=1, gradient_steps=args.gradient_steps,
+                    ent_coef=f"auto_{args.ent_init}" if args.bc_init else "auto",
                     target_entropy=args.target_entropy, policy_kwargs=kw, verbose=1,
                     seed=args.seed, device=device, tensorboard_log=tb_log)
         reset_ts = True
+        if args.bc_init:
+            load_bc_init(model, args.bc_init, cfg, args.bc_log_std)
+            model.__class__ = _PolicyWarmupSAC          # 버퍼 채우는 동안에도 무작위 대신 모방한 정책으로 운전
+    if args.compile:
+        compile_brains(model)
     actor = model.policy.actor
     n_act = sum(p.numel() for p in actor.parameters())
     n_brain = sum(p.numel() for p in actor.features_extractor.parameters())
@@ -159,7 +228,11 @@ def main():
           f"actor_params={n_act:,} (brain {n_brain:,}) maps={maps} eval={eval_maps} gamma={args.gamma:.4f} "
           f"v={cfg.action.v_min:g}~{cfg.action.v_max:g} m/s")
 
-    cbs = CallbackList([
+    cb_list = []
+    if args.bc_init and not resume:
+        from camera.depthfly.train import ActorFreeze
+        cb_list.append(ActorFreeze(model.learning_starts + args.actor_freeze_steps))
+    cbs = CallbackList(cb_list + [
         LapEvalCallback(eval_maps, cfg, save_dir, args.eval_freq, env_cls=LidarFlyEnv, env_cfg=cfg),
         CheckpointCallback(max(args.ckpt_freq // args.n_envs, 1), str(save_dir / "checkpoints"), name_prefix="sac"),
         TimeLimitCallback(args.time_limit_min, save_dir / "last_model", args.save_every_min),
